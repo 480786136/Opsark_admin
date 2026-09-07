@@ -1,0 +1,14 @@
+# Optional gateway profile. Validate each upstream model with real core requests.
+model_list:
+  - model_name: opsark-general
+    litellm_params:
+      model: os.environ/UPSTREAM_MODEL
+      api_base: os.environ/UPSTREAM_BASE_URL
+      api_key: os.environ/UPSTREAM_API_KEY
+      max_tokens: 4096
+router_settings:
+  num_retries: 0
+  fallbacks: []
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  store_model_in_db: true
