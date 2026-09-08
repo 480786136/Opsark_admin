@@ -14,18 +14,14 @@ services:
     build: .
     environment:
       DATABASE_URL: postgresql+psycopg://platform:${PLATFORM_DB_PASSWORD}@db:5432/platform
-      KNOWLEDGE_URL: http://knowledge-api:8002
-      KNOWLEDGE_PUBLIC_URL: ${KNOWLEDGE_PUBLIC_URL:-http://127.0.0.1:8002/api/v1}
-      KNOWLEDGE_SERVICE_TOKEN: ${KNOWLEDGE_SERVICE_TOKEN:?set KNOWLEDGE_SERVICE_TOKEN}
+      MODEL_KEY_ENCRYPTION_KEY: ${MODEL_KEY_ENCRYPTION_KEY:?set MODEL_KEY_ENCRYPTION_KEY}
+      MODEL_ALLOWED_HOSTS: ${MODEL_ALLOWED_HOSTS:?set MODEL_ALLOWED_HOSTS}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://127.0.0.1:8001}
-      MODEL_BASE_URL: ${MODEL_BASE_URL:-http://127.0.0.1:4000/v1}
-      MODEL_CONSOLE_URL: ${MODEL_CONSOLE_URL:-http://127.0.0.1:4000/ui}
     command: [sh, -c, 'alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 8001 --workers 1']
     depends_on:
       db: {condition: service_healthy}
     ports: ['127.0.0.1:8001:8001']
-    networks: [default, services]
   model-db:
     profiles: [models]
     image: postgres:17
@@ -59,7 +55,3 @@ services:
 volumes:
   platform-db:
   model-db:
-networks:
-  services:
-    external: true
-    name: opsark-services

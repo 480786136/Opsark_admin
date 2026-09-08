@@ -1,31 +1,46 @@
 <script setup>
-import { ref, reactive, onMounted } from "vue";
+import { ref, reactive, computed, onMounted } from "vue";
 const user = ref(null),
   csrf = ref(""),
   busy = ref(false),
   error = ref(""),
-  tab = ref("overview");
-const config = ref({}),
-  bases = ref([]),
-  docs = ref([]),
-  records = ref([]),
+  notice = ref(""),
+  tab = ref("providers");
+const providers = ref([]),
+  routes = ref([]),
   keys = ref([]),
-  jobs = ref([]),
-  hits = ref([]);
-const login = reactive({ username: "admin", password: "" }),
-  base = reactive({ name: "", description: "" });
-const keyForm = reactive({
-  name: "",
-  installation_id: "",
-  knowledge_base_ids: [],
-  scopes: ["records:write", "records:read", "knowledge:read"],
-  expires_days: 90,
-});
+  calls = ref([]),
+  config = ref({});
 const freshKey = ref(""),
-  editor = ref(null),
-  query = ref(""),
-  selectedBase = ref(""),
-  searchMode = ref("");
+  offset = ref(0);
+const login = reactive({ username: "admin", password: "" });
+const provider = reactive({
+  id: "",
+  name: "",
+  base_url: "",
+  api_key: "",
+  enabled: true,
+  timeout_seconds: 60,
+});
+const route = reactive({
+  id: "",
+  alias: "",
+  provider_id: "",
+  upstream_model: "",
+  enabled: true,
+});
+const keyForm = reactive({
+  owner: "",
+  allowed_models: [],
+  expires_days: 30,
+  rpm: 30,
+});
+const baseURL = window.location.origin + "/v1";
+const sample = computed(() => ({
+  total: calls.value.length,
+  success: calls.value.filter((c) => c.status === "succeeded").length,
+  failed: calls.value.filter((c) => c.status === "failed").length,
+}));
 async function api(path, method = "GET", body) {
   const response = await fetch("/api/admin/v1/" + path, {
     method,
@@ -43,6 +58,7 @@ async function api(path, method = "GET", body) {
 async function action(fn) {
   busy.value = true;
   error.value = "";
+  notice.value = "";
   try {
     await fn();
   } catch (e) {
@@ -52,16 +68,16 @@ async function action(fn) {
   }
 }
 async function refresh() {
-  config.value = await api("config");
-  if (!config.value.knowledge_connected) return;
-  const result = await Promise.all(
-    ["knowledge-bases", "documents", "records", "knowledge-keys", "jobs"].map(
-      (p) => api("knowledge/" + p),
-    ),
-  );
-  [bases.value, docs.value, records.value, keys.value, jobs.value] = result;
-  if (!selectedBase.value && bases.value.length)
-    selectedBase.value = bases.value[0].id;
+  [config.value, providers.value, routes.value, keys.value, calls.value] =
+    await Promise.all(
+      [
+        "config",
+        "providers",
+        "routes",
+        "model-keys",
+        "calls?offset=" + offset.value,
+      ].map((p) => api(p)),
+    );
 }
 async function signIn() {
   const s = await api("session", "POST", login);
@@ -73,83 +89,50 @@ async function signIn() {
 async function signOut() {
   await api("session", "DELETE");
   user.value = null;
-  freshKey.value = "";
   csrf.value = "";
-  records.value = [];
-  docs.value = [];
+  freshKey.value = "";
+  provider.api_key = "";
   keys.value = [];
-  hits.value = [];
-  editor.value = null;
+  calls.value = [];
 }
-function edit(doc) {
-  editor.value = doc
-    ? { ...doc }
-    : {
-        knowledge_base_id: selectedBase.value,
-        title: "",
-        content: "",
-        tags: [],
-        environment: "",
-        software_names: [],
-      };
-  tab.value = "documents";
+function resetProvider() {
+  Object.assign(provider, {
+    id: "",
+    name: "",
+    base_url: "",
+    api_key: "",
+    enabled: true,
+    timeout_seconds: 60,
+  });
 }
-async function save() {
-  const d = editor.value,
-    body = Object.fromEntries(
-      [
-        "knowledge_base_id",
-        "title",
-        "content",
-        "tags",
-        "environment",
-        "software_names",
-      ].map((k) => [k, d[k]]),
-    );
-  if (d.id) body.revision = d.revision;
-  await api(
-    "knowledge/documents" + (d.id ? "/" + d.id + "/draft" : ""),
-    d.id ? "PATCH" : "POST",
-    body,
-  );
-  editor.value = null;
+function resetRoute() {
+  Object.assign(route, {
+    id: "",
+    alias: "",
+    provider_id: "",
+    upstream_model: "",
+    enabled: true,
+  });
+}
+async function saveProvider() {
+  const { id, ...body } = provider;
+  await api("providers" + (id ? "/" + id : ""), id ? "PUT" : "POST", body);
+  resetProvider();
+  await refresh();
+  notice.value = "供应商已保存";
+}
+async function saveRoute() {
+  const { id, ...body } = route;
+  await api("routes" + (id ? "/" + id : ""), id ? "PUT" : "POST", body);
+  resetRoute();
   await refresh();
 }
-async function publish(d) {
-  await api("knowledge/documents/" + d.id + "/publish", "POST", {
-    revision: d.revision,
-  });
+async function issueKey() {
+  freshKey.value = "";
+  const r = await api("model-keys", "POST", keyForm);
+  freshKey.value = r.api_key;
   await refresh();
 }
-async function search() {
-  const r = await api("knowledge/search", "POST", {
-    query: query.value,
-    knowledge_base_ids: [selectedBase.value],
-    top_k: 5,
-    max_content_chars: 6000,
-  });
-  hits.value = r.hits;
-  searchMode.value = r.retrieval_mode;
-}
-async function importText(event) {
-  const f = event.target.files?.[0];
-  if (!f) return;
-  if (!/\.(md|txt)$/i.test(f.name) || f.size > 2 * 1024 * 1024)
-    throw new Error("仅支持 2 MiB 以内 MD/TXT");
-  edit(null);
-  editor.value.title = f.name;
-  editor.value.content = await f.text();
-  event.target.value = "";
-}
-const menus = [
-  ["overview", "工作概览"],
-  ["documents", "知识文档"],
-  ["records", "记录收件箱"],
-  ["search", "检索调试"],
-  ["keys", "客户端 Key"],
-  ["jobs", "处理任务"],
-  ["models", "模型接入"],
-];
 onMounted(() =>
   action(async () => {
     try {
@@ -166,8 +149,8 @@ onMounted(() =>
 <template>
   <main v-if="!user" class="login">
     <div class="brand">O<span>Opsark</span></div>
-    <h1>平台管理</h1>
-    <p>模型与知识服务的统一管理入口</p>
+    <h1>模型接入管理</h1>
+    <p>第三方 API 配置、模型转发与调用监控。无需启动知识服务。</p>
     <form @submit.prevent="action(signIn)">
       <label
         >管理员账号<input
@@ -180,23 +163,29 @@ onMounted(() =>
           type="password"
           autocomplete="current-password"
           required /></label
-      ><button :disabled="busy">登录管理平台</button>
+      ><button :disabled="busy">登录</button>
     </form>
-    <p v-if="error" role="alert" class="error">{{ error }}</p>
-    <small>首次使用：在服务器运行 python -m app.bootstrap 创建管理员。</small>
+    <p v-if="error" class="error" role="alert">{{ error }}</p>
+    <small>首次运行 python -m app.bootstrap 创建本平台管理员。</small>
   </main>
   <div v-else class="shell">
     <aside>
       <div class="brand">O<span>Opsark</span></div>
-      <div class="subtitle">PLATFORM CONSOLE</div>
+      <div class="subtitle">MODEL CONSOLE</div>
       <nav>
         <button
-          v-for="[id, label] in menus"
+          v-for="[id, label] in [
+            ['providers', '供应商 API'],
+            ['routes', '模型路由'],
+            ['keys', '用户模型 Key'],
+            ['calls', '调用监控'],
+          ]"
           :key="id"
           :class="{ active: tab === id }"
           @click="
             tab = id;
             freshKey = '';
+            provider.api_key = '';
           "
         >
           {{ label }}
@@ -204,308 +193,281 @@ onMounted(() =>
       </nav>
       <div class="account">
         {{ user
-        }}<button class="secondary" @click="action(signOut)">退出登录</button>
+        }}<button class="secondary" @click="action(signOut)">退出</button>
       </div>
     </aside>
     <section class="workspace">
       <header>
         <div>
-          <small>Opsark / 管理平台</small>
-          <h1>{{ menus.find((m) => m[0] === tab)?.[1] }}</h1>
+          <small>独立模型平台</small>
+          <h1>
+            {{
+              {
+                providers: "供应商 API",
+                routes: "模型路由",
+                keys: "用户模型 Key",
+                calls: "调用监控",
+              }[tab]
+            }}
+          </h1>
         </div>
-        <button class="secondary" :disabled="busy" @click="action(refresh)">
-          {{ busy ? "处理中…" : "刷新数据" }}
-        </button>
+        <button :disabled="busy" @click="action(refresh)">刷新</button>
       </header>
-      <p class="error" role="alert" v-if="error">{{ error }}</p>
-      <template v-if="tab === 'overview'"
-        ><div class="stats">
-          <article>
-            <small>知识库</small><strong>{{ bases.length }}</strong>
-          </article>
-          <article>
-            <small>文档</small><strong>{{ docs.length }}</strong>
-          </article>
-          <article>
-            <small>待审核来源</small
-            ><strong>{{
-              records.filter((r) => r.status === "ready_for_review").length
-            }}</strong>
-          </article>
-        </div>
-        <article>
-          <h2>服务边界</h2>
-          <p>
-            平台管理与知识服务独立部署。知识不可用时，平台身份和模型入口保持独立。
-          </p>
-          <p>
-            知识接口：<code>{{ config.knowledge_base_url }}</code>
-          </p>
-          <p>
-            模型接口：<code>{{ config.model_base_url }}</code>
-          </p>
-          <p v-if="!config.knowledge_connected" class="error">
-            尚未配置服务间凭据，请填写服务器 .env。
-          </p>
+      <p v-if="error" class="error" role="alert">{{ error }}</p>
+      <p v-if="notice" role="status">{{ notice }}</p>
+      <article>
+        <p>
+          core 模型 base URL：<code>{{ baseURL }}</code>
+        </p>
+        <p>
+          只接受平台签发的模型 Key；不是上游 Key、知识 Key
+          或管理员密码。首版支持 Chat Completions 兼容 API，其他协议暂不支持。
+        </p>
+        <p v-if="!config.encryption_configured" class="error">
+          尚未配置 MODEL_KEY_ENCRYPTION_KEY，不能保存上游 Key。请按 README
+          初始化，不能丢失或随意替换。
+        </p>
+        <p>
+          允许上游主机：{{
+            config.allowed_hosts?.join(", ") ||
+            "未配置 MODEL_ALLOWED_HOSTS；禁止向任意地址转发"
+          }}
+        </p>
+      </article>
+      <template v-if="tab === 'providers'"
+        ><article>
+          <h2>{{ provider.id ? "编辑" : "新增" }}供应商</h2>
+          <form @submit.prevent="action(saveProvider)">
+            <label
+              >名称<input
+                v-model="provider.name"
+                required
+                maxlength="100" /></label
+            ><label
+              >API base URL（HTTPS）<input
+                v-model="provider.base_url"
+                required
+                placeholder="https://provider.example/v1" /></label
+            ><label
+              >上游 API Key<input
+                v-model="provider.api_key"
+                type="password"
+                autocomplete="new-password"
+                :required="!provider.id"
+                placeholder="编辑留空保留；更换地址必须重输"
+            /></label>
+            <label
+              >超时秒数<input
+                v-model.number="provider.timeout_seconds"
+                type="number"
+                min="5"
+                max="300"
+                required /></label
+            ><label
+              ><input v-model="provider.enabled" type="checkbox" />启用</label
+            ><button :disabled="busy">保存</button
+            ><button type="button" class="secondary" @click="resetProvider">
+              取消编辑
+            </button>
+          </form>
         </article>
-        <article>
-          <h2>新建知识库</h2>
-          <form
-            @submit.prevent="
-              action(async () => {
-                await api('knowledge/knowledge-bases', 'POST', base);
-                base.name = '';
-                base.description = '';
-                await refresh();
+        <article v-for="p in providers" :key="p.id">
+          <h2>{{ p.name }} · {{ p.enabled ? "启用" : "停用" }}</h2>
+          <p>{{ p.base_url }} · {{ p.timeout_seconds }} 秒</p>
+          <button
+            @click="
+              Object.assign(provider, {
+                id: p.id,
+                name: p.name,
+                base_url: p.base_url,
+                api_key: '',
+                enabled: p.enabled,
+                timeout_seconds: p.timeout_seconds,
               })
             "
           >
-            <label
-              >名称<input v-model="base.name" required maxlength="200" /></label
-            ><label>描述<input v-model="base.description" /></label
-            ><button :disabled="busy">创建知识库</button>
-          </form>
+            编辑 / 启停
+          </button>
+          <button
+            :disabled="busy || !p.enabled"
+            @click="
+              action(async () => {
+                const r = await api('providers/' + p.id + '/test', 'POST');
+                notice =
+                  '模型列表探测：HTTP ' +
+                  r.http_status +
+                  ' / ' +
+                  r.duration_ms +
+                  'ms；不代表生成能力已验证';
+              })
+            "
+          >
+            测试连接
+          </button>
         </article></template
       >
-      <template v-if="tab === 'documents'"
-        ><div class="toolbar">
-          <button @click="edit(null)" :disabled="!bases.length">新建文档</button
-          ><label class="file"
-            >导入 MD / TXT<input
-              type="file"
-              accept=".md,.txt"
-              @change="(e) => action(() => importText(e))"
-          /></label>
-        </div>
-        <article v-if="editor">
-          <h2>{{ editor.id ? "编辑草稿" : "新建草稿" }}</h2>
-          <form @submit.prevent="action(save)">
+      <template v-if="tab === 'routes'"
+        ><article>
+          <h2>{{ route.id ? "编辑" : "新增" }}模型路由</h2>
+          <form @submit.prevent="action(saveRoute)">
             <label
-              >知识库<select
-                v-model="editor.knowledge_base_id"
-                :disabled="!!editor.id"
+              >对外模型名<input
+                v-model="route.alias"
+                :disabled="!!route.id"
                 required
-              >
-                <option v-for="b in bases" :value="b.id">{{ b.name }}</option>
+                maxlength="128" /></label
+            ><label
+              >供应商<select v-model="route.provider_id" required>
+                <option value="">请选择</option>
+                <option v-for="p in providers" :key="p.id" :value="p.id">
+                  {{ p.name }}
+                </option>
               </select></label
             ><label
-              >标题<input
-                v-model="editor.title"
+              >上游真实模型名<input
+                v-model="route.upstream_model"
                 required
                 maxlength="200" /></label
-            ><label
-              >环境<input
-                v-model="editor.environment"
-                placeholder="例如 production" /></label
-            ><label
-              >正文（纯文本 / Markdown）<textarea
-                v-model="editor.content"
-                rows="14"
-                required
-              ></textarea></label
-            ><button :disabled="busy">保存草稿</button>
-            <button type="button" class="secondary" @click="editor = null">
+            ><label><input v-model="route.enabled" type="checkbox" />启用</label
+            ><button :disabled="busy">保存路由</button
+            ><button type="button" class="secondary" @click="resetRoute">
               取消
             </button>
           </form>
         </article>
-        <article v-for="d in docs" :key="d.id">
-          <div class="row">
-            <h2>{{ d.title }}</h2>
-            <span class="badge">{{ d.status }}</span>
-          </div>
+        <article v-for="r in routes" :key="r.id">
+          <h2>{{ r.alias }} · {{ r.enabled ? "启用" : "停用" }}</h2>
           <p>
-            修订 {{ d.revision }} · 发布版本
-            {{ d.published_version ?? "未发布" }}
+            {{ providers.find((p) => p.id === r.provider_id)?.name }} /
+            {{ r.upstream_model }}
           </p>
-          <button
-            class="secondary"
-            @click="edit(d)"
-            :disabled="d.status === 'indexing'"
-          >
-            编辑
-          </button>
-          <button
-            @click="action(() => publish(d))"
-            :disabled="busy || d.status === 'indexing'"
-          >
-            审核并发布
-          </button>
-          <button
-            class="secondary"
-            @click="
-              action(async () => {
-                await api('knowledge/documents/' + d.id + '/unpublish', 'POST');
-                await refresh();
-              })
-            "
-            :disabled="busy"
-          >
-            下架 / 取消发布
-          </button>
-        </article>
-        <p v-if="!docs.length">
-          尚无文档。创建草稿或从 core 上传记录开始。
-        </p></template
-      >
-      <template v-if="tab === 'records'"
-        ><article>
-          <p>
-            只接收 core 主动选择并脱敏的记录。上传后需 Worker 整理，再审核发布。
-          </p>
-        </article>
-        <article v-for="r in records" :key="r.id">
-          <div class="row">
-            <h2>{{ r.payload?.title || r.source_record_id }}</h2>
-            <span class="badge">{{ r.status }}</span>
-          </div>
-          <p>
-            客户端 {{ r.installation_id }} · 来源修订 {{ r.source_revision }}
-          </p>
-          <details>
-            <summary>查看脱敏来源</summary>
-            <pre>{{ JSON.stringify(r.payload, null, 2) }}</pre>
-          </details>
+          <button @click="Object.assign(route, r)">编辑 / 切换渠道</button>
         </article></template
       >
       <template v-if="tab === 'keys'"
         ><article>
-          <h2>签发知识 Key</h2>
-          <p>仅展示一次完整 Key；模型 Key 请在模型控制台独立签发。</p>
-          <form
-            @submit.prevent="
-              action(async () => {
-                const r = await api(
-                  'knowledge/knowledge-keys',
-                  'POST',
-                  keyForm,
-                );
-                freshKey = r.api_key;
-                await refresh();
-              })
-            "
-          >
-            <label>名称<input v-model="keyForm.name" required /></label
+          <h2>签发用户模型 Key</h2>
+          <form @submit.prevent="action(issueKey)">
+            <label
+              >用户/客户标识<input
+                v-model="keyForm.owner"
+                maxlength="128"
+                required /></label
             ><label
-              >core 安装标识<input
-                v-model="keyForm.installation_id"
-                required
-                placeholder="developer-laptop" /></label
-            ><label
-              >授权知识库<select
-                v-model="keyForm.knowledge_base_ids"
+              >允许模型（可多选）<select
+                v-model="keyForm.allowed_models"
                 multiple
                 required
               >
-                <option v-for="b in bases" :value="b.id">{{ b.name }}</option>
+                <option
+                  v-for="r in routes.filter((r) => r.enabled)"
+                  :key="r.id"
+                  :value="r.alias"
+                >
+                  {{ r.alias }}
+                </option>
               </select></label
+            ><label
+              >有效天数<input
+                v-model.number="keyForm.expires_days"
+                type="number"
+                min="1"
+                max="365"
+                required /></label
+            ><label
+              >每分钟请求上限<input
+                v-model.number="keyForm.rpm"
+                type="number"
+                min="1"
+                max="600"
+                required /></label
             ><button :disabled="busy">生成 Key</button>
           </form>
-          <div v-if="freshKey" class="secret">
-            <p>请现在复制到 core 系统钥匙串；离开此页面后不再展示。</p>
-            <code>{{ freshKey }}</code
-            ><button class="secondary" @click="freshKey = ''">
-              已保存，隐藏
-            </button>
+          <div v-if="freshKey">
+            <p>完整 Key 仅显示本次，请安全保存，不放进日志或截图。</p>
+            <pre>{{ freshKey }}</pre>
+            <button @click="freshKey = ''">隐藏</button>
           </div>
         </article>
         <article v-for="k in keys" :key="k.id">
-          <div class="row">
-            <h2>{{ k.name }}</h2>
-            <span>{{ k.revoked ? "已撤销" : k.prefix + "…" }}</span>
-          </div>
+          <h2>{{ k.owner }} · {{ k.prefix }}…</h2>
           <p>
-            {{ k.installation_id }} ·
-            {{ new Date(k.expires * 1000).toLocaleDateString() }} 到期
+            {{ k.allowed_models.join(", ") }} · {{ k.rpm }} RPM · 到期
+            {{ new Date(k.expires * 1000).toLocaleString() }}
           </p>
+          <p v-if="k.revoked">已撤销</p>
           <button
-            class="secondary"
-            :disabled="k.revoked || busy"
+            v-else
+            :disabled="busy"
             @click="
               action(async () => {
-                await api('knowledge/knowledge-keys/' + k.id, 'DELETE');
+                if (!confirm('撤销后此 Key 不能发起新请求，确认？')) return;
+                await api('model-keys/' + k.id, 'DELETE');
                 await refresh();
               })
             "
           >
-            撤销
+            撤销 Key
           </button>
         </article></template
       >
-      <template v-if="tab === 'search'"
+      <template v-if="tab === 'calls'"
         ><article>
-          <form @submit.prevent="action(search)">
-            <label
-              >知识库<select v-model="selectedBase" required>
-                <option v-for="b in bases" :value="b.id">{{ b.name }}</option>
-              </select></label
-            ><label
-              >查询<input
-                v-model="query"
-                required
-                placeholder="输入问题、命令、路径或错误码" /></label
-            ><button :disabled="busy">检索已发布知识</button>
-          </form>
-          <p v-if="searchMode">模式：{{ searchMode }}</p>
-        </article>
-        <article v-for="h in hits" :key="h.chunk_id">
-          <h2>[{{ h.citation.label }}] {{ h.title }}</h2>
+          <h2>当前页统计（最多 100 条）</h2>
           <p>
-            版本 {{ h.document_version }} · 行 {{ h.citation.line_start }}–{{
-              h.citation.line_end
+            请求 {{ sample.total }} · 成功 {{ sample.success }} · 失败
+            {{ sample.failed }} · 成功比例
+            {{
+              sample.total
+                ? Math.round((sample.success / sample.total) * 100)
+                : 0
+            }}%
+          </p>
+          <p>
+            只保存请求元数据，不保存对话/密钥。Token “未知”不是
+            0，不可直接当作计费账本。running
+            表示尚无完成记录，进程异常退出也可能留下此状态。
+          </p>
+          <button
+            :disabled="busy || offset === 0"
+            @click="
+              action(async () => {
+                offset = Math.max(0, offset - 100);
+                await refresh();
+              })
+            "
+          >
+            上一页</button
+          ><button
+            :disabled="busy || calls.length < 100"
+            @click="
+              action(async () => {
+                offset += 100;
+                await refresh();
+              })
+            "
+          >
+            下一页
+          </button>
+        </article>
+        <article v-for="c in calls" :key="c.id">
+          <h2>{{ c.model }} · {{ c.status }}</h2>
+          <p>
+            {{ c.owner }} ·
+            {{
+              providers.find((p) => p.id === c.provider_id)?.name ||
+              c.provider_id
             }}
-          </p>
-          <pre>{{ h.content }}</pre>
-        </article></template
-      >
-      <template v-if="tab === 'jobs'"
-        ><article v-for="j in jobs" :key="j.id">
-          <div class="row">
-            <h2>{{ j.kind === "draft" ? "生成草稿" : "构建发布索引" }}</h2>
-            <span class="badge">{{ j.status }}</span>
-          </div>
-          <p>{{ j.target_id }} · 已尝试 {{ j.attempts }} 次</p>
-          <p v-if="j.error">{{ j.error }}</p>
-          <button
-            v-if="j.status === 'failed'"
-            @click="
-              action(async () => {
-                await api('knowledge/jobs/' + j.id + '/retry', 'POST');
-                await refresh();
-              })
-            "
-          >
-            重新处理
-          </button>
-        </article></template
-      >
-      <template v-if="tab === 'models'"
-        ><article>
-          <h2>独立模型网关</h2>
-          <p>
-            在 LiteLLM 配置供应商、模型别名和受限 Key。供应商原始密钥不下发
-            core。
+            · {{ new Date(c.started_at * 1000).toLocaleString() }}
           </p>
           <p>
-            core 模型 endpoint：<code>{{ config.model_base_url }}</code>
+            HTTP {{ c.http_status ?? "未知" }} ·
+            {{ c.duration_ms ?? "未知" }} ms · 输入
+            {{ c.input_tokens ?? "未知" }} / 输出
+            {{ c.output_tokens ?? "未知" }}
           </p>
-          <a
-            :href="config.model_console_url"
-            target="_blank"
-            rel="noopener noreferrer"
-            >打开模型控制台 ↗</a
-          >
-          <p>该入口需要单独部署 LiteLLM，本平台不会伪造已连接状态。</p>
-        </article>
-        <article>
-          <h2>core 设置对接约定</h2>
-          <p>
-            知识地址：<code>{{ config.knowledge_base_url }}</code>
-          </p>
-          <p>
-            配置知识 API
-            Key、目标知识库、上传开关和检索开关。两个开关默认关闭；开发者可以单独调试上传与检索。
-          </p>
+          <p v-if="c.error_code">{{ c.error_code }}</p>
+          <small>请求 ID：{{ c.id }}</small>
         </article></template
       >
     </section>

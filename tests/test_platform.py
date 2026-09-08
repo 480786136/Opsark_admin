@@ -1,5 +1,4 @@
 import pytest
-import httpx
 from argon2 import PasswordHasher
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -50,40 +49,21 @@ def test_login_csrf_and_logout(env):
     assert env.get("/api/admin/v1/session").status_code == 401
 
 
-def test_knowledge_proxy_allowlist_and_credentials(env):
+def test_knowledge_management_has_moved(env):
     auth(env)
-    captured = []
-
-    def upstream(request):
-        captured.append(request)
-        return httpx.Response(200, json=[])
-
-    app.state.knowledge_client = httpx.AsyncClient(
-        base_url="http://knowledge/", transport=httpx.MockTransport(upstream)
-    )
-    assert env.get("/api/admin/v1/knowledge/records").status_code == 200
-    assert captured[0].url.path == "/internal/v1/records"
-    assert captured[0].headers["authorization"] == "Bearer " + "t" * 40
-    assert "cookie" not in captured[0].headers
-    assert env.post("/api/admin/v1/knowledge/knowledge-keys", json={}).status_code == 403
-    assert env.get("/api/admin/v1/knowledge/key/generate").status_code == 404
+    response = env.get("/api/admin/v1/knowledge/records")
+    assert response.status_code == 410
+    assert response.json()["error"]["code"] == "KNOWLEDGE_MOVED"
+    assert env.get("/api/admin/v1/session").status_code == 200
     assert "knowledge_service_token" not in env.get("/api/admin/v1/config").text
 
 
-def test_knowledge_outage_does_not_break_platform(env):
-    auth(env)
-
-    def unavailable(request):
-        raise httpx.ConnectError("internal details")
-
-    app.state.knowledge_client = httpx.AsyncClient(
-        base_url="http://knowledge/", transport=httpx.MockTransport(unavailable)
-    )
-    response = env.get("/api/admin/v1/knowledge/records")
-    assert response.status_code == 503 and "internal details" not in response.text
-    assert env.get("/api/admin/v1/session").status_code == 200
-    assert env.get("/api/admin/v1/config").status_code == 200
-
-
 def test_platform_owns_no_knowledge_tables():
-    assert set(Base.metadata.tables) == {"admins", "sessions"}
+    assert set(Base.metadata.tables) == {
+        "admins",
+        "sessions",
+        "model_providers",
+        "model_routes",
+        "model_keys",
+        "model_calls",
+    }

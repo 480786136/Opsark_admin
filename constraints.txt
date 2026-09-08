@@ -1,4 +1,5 @@
 # Resolved on 2026-09-07. Used with pip install -c constraints.txt .
+cryptography==48.0.1
 alembic==1.19.2
 annotated-doc==0.0.5
 annotated-types==0.8.0

@@ -1,6 +1,5 @@
-import re
+import asyncio
 import time
-import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 import httpx
@@ -21,9 +20,13 @@ from .security import ApiError, check_origin, digest, limiter, require_admin, to
 @asynccontextmanager
 async def lifespan(app):
     async with httpx.AsyncClient(
-        base_url=settings().knowledge_url.rstrip("/") + "/", timeout=40, follow_redirects=False, trust_env=False
+        timeout=60,
+        follow_redirects=False,
+        trust_env=False,
+        limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
     ) as client:
-        app.state.knowledge_client = client
+        app.state.model_client = client
+        app.state.model_slots = asyncio.Semaphore(8)
         yield
 
 
@@ -103,60 +106,23 @@ def logout(response: Response, session=Depends(require_admin), db=Depends(get_db
 
 @app.get("/api/admin/v1/config")
 def config(session=Depends(require_admin)):
-    s = settings()
     return {
-        "knowledge_base_url": s.knowledge_public_url,
-        "model_base_url": s.model_base_url,
-        "model_console_url": s.model_console_url,
-        "knowledge_connected": len(s.knowledge_service_token) >= 32,
-        "core_defaults": {"upload_enabled": False, "search_enabled": False},
+        "model_base_url": "/v1",
+        "protocol": "chat_completions",
+        "encryption_configured": bool(settings().model_key_encryption_key),
+        "allowed_hosts": [x.strip() for x in settings().model_allowed_hosts.split(",") if x.strip()],
     }
 
 
-# Only this explicit management surface can be reached with a platform session.
-ROUTES = {
-    "GET": [r"health", r"knowledge-bases", r"knowledge-keys", r"records", r"documents", r"jobs", r"audit-events"],
-    "POST": [
-        r"knowledge-bases",
-        r"knowledge-keys",
-        r"documents",
-        r"documents/[a-f0-9]{32}/(?:publish|unpublish)",
-        r"jobs/[a-f0-9]{32}/retry",
-        r"search",
-    ],
-    "PATCH": [r"knowledge-bases/[a-f0-9]{32}", r"documents/[a-f0-9]{32}/draft"],
-    "DELETE": [r"knowledge-keys/[a-f0-9]{32}", r"documents/[a-f0-9]{32}", r"records/[a-f0-9]{32}"],
-}
-
-
 @app.api_route("/api/admin/v1/knowledge/{path:path}", methods=["GET", "POST", "PATCH", "DELETE"])
-async def knowledge_proxy(path: str, request: Request, session=Depends(require_admin)):
-    if not any(re.fullmatch(pattern, path) for pattern in ROUTES[request.method]):
-        raise ApiError(404, "RESOURCE_NOT_FOUND")
-    if len(settings().knowledge_service_token) < 32:
-        raise ApiError(503, "KNOWLEDGE_NOT_CONFIGURED", "请在服务器配置知识服务地址和服务凭据")
-    try:
-        upstream = await request.app.state.knowledge_client.request(
-            request.method,
-            "internal/v1/" + path,
-            content=await request.body(),
-            headers={
-                "Authorization": f"Bearer {settings().knowledge_service_token}",
-                "X-Opsark-Actor": session.admin_id,
-                "Content-Type": "application/json",
-                "X-Request-ID": uuid.uuid4().hex,
-            },
-        )
-    except httpx.RequestError:
-        raise ApiError(503, "KNOWLEDGE_UNAVAILABLE", "知识服务暂时不可用，平台登录与模型配置仍可使用")
-    if upstream.status_code >= 500:
-        raise ApiError(503, "KNOWLEDGE_UNAVAILABLE", "知识服务处理失败")
-    try:
-        body = upstream.json()
-    except ValueError:
-        raise ApiError(502, "INVALID_KNOWLEDGE_RESPONSE")
-    return JSONResponse(body, status_code=upstream.status_code)
+def retired_knowledge(path: str, session=Depends(require_admin)):
+    raise ApiError(410, "KNOWLEDGE_MOVED", "知识管理已独立，请访问知识服务自己的管理页面")
 
+
+from .gateway import admin as model_admin, public as model_public  # noqa: E402
+
+app.include_router(model_admin)
+app.include_router(model_public)
 
 web = Path(__file__).resolve().parent.parent / "web" / "dist"
 if web.is_dir():
