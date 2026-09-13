@@ -13,7 +13,8 @@ class Settings(BaseSettings):
     knowledge_public_url: str = "http://127.0.0.1:8002/api/v1"
     knowledge_service_token: str = ""
     model_key_encryption_key: str = ""
-    model_allowed_hosts: str = ""
+    model_call_capture_enabled: bool = True
+    model_call_retention_days: int = 7
 
 
 @lru_cache

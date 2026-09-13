@@ -110,7 +110,6 @@ def config(session=Depends(require_admin)):
         "model_base_url": "/v1",
         "protocol": "chat_completions",
         "encryption_configured": bool(settings().model_key_encryption_key),
-        "allowed_hosts": [x.strip() for x in settings().model_allowed_hosts.split(",") if x.strip()],
     }
 
 

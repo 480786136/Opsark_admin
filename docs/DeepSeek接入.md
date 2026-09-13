@@ -5,7 +5,6 @@
 Admin 根目录的 `.env` 只需允许 DeepSeek 的上游主机：
 
 ```dotenv
-MODEL_ALLOWED_HOSTS=api.deepseek.com
 ```
 
 这里只填写主机名，不带 `https://`、端口或路径。修改 `.env` 后必须重启 Admin API。
@@ -93,7 +92,7 @@ Invoke-RestMethod `
 
 ## 6. 常见错误
 
-- `INVALID_UPSTREAM`：`.env` 的白名单必须是 `api.deepseek.com`，保存后重启 Admin。
+- `INVALID_UPSTREAM`：检查上游为 HTTPS/443 地址，不含内嵌凭据、查询参数或片段。无需配置主机白名单。
 - `INVALID_MODEL_KEY`：传入的不是有效且未过期的 `omk_` 平台 Key。
 - `MODEL_DENIED`：该平台 Key 没有获准使用请求中的模型别名。
 - `UPSTREAM_HTTP_ERROR`：检查 DeepSeek Key、账户额度、上游模型名和请求参数，再查看调用监控。

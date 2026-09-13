@@ -28,5 +28,9 @@ def test_upgrade_existing_platform_keeps_admins(tmp_path):
         )
     with engine.connect() as c:
         assert c.execute(text("SELECT password_hash FROM admins WHERE id='existing'")).scalar() == "synthetic-hash"
-    assert {"model_providers", "model_routes", "model_keys", "model_calls"}.issubset(inspect(engine).get_table_names())
+    assert {"model_providers", "model_routes", "model_keys", "model_calls", "model_call_details"}.issubset(
+        inspect(engine).get_table_names()
+    )
+    assert "parameter_defaults" in {column["name"] for column in inspect(engine).get_columns("model_providers")}
+    assert "parameter_overrides" in {column["name"] for column in inspect(engine).get_columns("model_routes")}
     engine.dispose()

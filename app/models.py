@@ -27,6 +27,7 @@ class Provider(Base):
     encrypted_key: Mapped[str] = mapped_column(Text)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     timeout_seconds: Mapped[int] = mapped_column(Integer, default=60)
+    parameter_defaults: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class ModelRoute(Base):
@@ -36,6 +37,7 @@ class ModelRoute(Base):
     provider_id: Mapped[str] = mapped_column(ForeignKey("model_providers.id"))
     upstream_model: Mapped[str] = mapped_column(String(200))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    parameter_overrides: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class ModelKey(Base):
@@ -64,3 +66,10 @@ class ModelCall(Base):
     input_tokens: Mapped[int | None] = mapped_column(Integer)
     output_tokens: Mapped[int | None] = mapped_column(Integer)
     error_code: Mapped[str | None] = mapped_column(String(64))
+
+
+class ModelCallDetail(Base):
+    __tablename__ = "model_call_details"
+    call_id: Mapped[str] = mapped_column(ForeignKey("model_calls.id"), primary_key=True)
+    encrypted_content: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[float] = mapped_column(Float, index=True)

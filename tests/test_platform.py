@@ -66,4 +66,5 @@ def test_platform_owns_no_knowledge_tables():
         "model_routes",
         "model_keys",
         "model_calls",
+        "model_call_details",
     }

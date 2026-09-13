@@ -3,6 +3,7 @@
 import asyncio
 import ipaddress
 import json
+import logging
 import time
 from urllib.parse import urlsplit
 import httpx
@@ -10,10 +11,12 @@ from cryptography.fernet import Fernet, InvalidToken
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from .config import settings
 from .db import get_db
-from .models import Provider, ModelRoute, ModelKey, ModelCall
+from .models import Provider, ModelRoute, ModelKey, ModelCall, ModelCallDetail
+from .call_details import snapshot
+from .model_parameters import ModelParameters, merge_parameters, validate_call_parameters
 from .security import ApiError, digest, token, limiter, require_admin
 
 admin = APIRouter(prefix="/api/admin/v1", dependencies=[Depends(require_admin)])
@@ -30,29 +33,31 @@ def cipher():
 def destination(value):
     try:
         u = urlsplit(value)
-        allowed = {x.strip().lower() for x in settings().model_allowed_hosts.split(",") if x.strip()}
         if (
-            u.scheme != "https"
+            u.scheme not in {"http", "https"}
             or not u.hostname
-            or u.hostname.lower() not in allowed
             or u.username
             or u.password
             or u.query
             or u.fragment
-            or u.port not in {None, 443}
+            or u.port == 0
+            or any(char.isspace() or ord(char) < 32 for char in value)
         ):
             raise ValueError()
         try:
             address = ipaddress.ip_address(u.hostname)
         except ValueError:
             address = None
-        if address is not None and not address.is_global:
+        if address is not None and (
+            address.is_loopback or address.is_link_local
+            or address.is_unspecified or address.is_multicast
+        ):
             raise ValueError()
         if u.hostname in {"localhost", "metadata.google.internal"} or ".." in u.path or "\\" in value:
             raise ValueError()
     except ValueError:
         raise ApiError(
-            422, "INVALID_UPSTREAM", "上游须使用 HTTPS/443，且主机须在 MODEL_ALLOWED_HOSTS 白名单中；不允许内嵌凭据"
+            422, "INVALID_UPSTREAM", "上游须为有效 HTTP/HTTPS 地址，可使用内网 IP 和自定义端口；不允许内嵌凭据、查询参数、片段或本机/链路本地地址"
         )
     return value.rstrip("/")
 
@@ -80,6 +85,7 @@ def provider_data(p):
         "timeout_seconds": p.timeout_seconds,
         "has_key": bool(p.encrypted_key),
         "protocol": "chat_completions",
+        "parameter_defaults": p.parameter_defaults or {},
     }
 
 
@@ -93,6 +99,7 @@ class ProviderInput(Strict):
     api_key: str = Field(default="", max_length=4096)
     enabled: bool = True
     timeout_seconds: int = Field(default=60, ge=5, le=300)
+    parameter_defaults: ModelParameters = Field(default_factory=ModelParameters)
 
 
 @admin.get("/providers")
@@ -111,6 +118,7 @@ def create_provider(body: ProviderInput, db=Depends(get_db)):
         encrypted_key=cipher().encrypt(body.api_key.encode()).decode(),
         enabled=body.enabled,
         timeout_seconds=body.timeout_seconds,
+        parameter_defaults=body.parameter_defaults.compact(),
     )
     db.add(row)
     db.commit()
@@ -126,6 +134,7 @@ def edit_provider(ident: str, body: ProviderInput, db=Depends(get_db)):
     if body.api_key:
         row.encrypted_key = cipher().encrypt(body.api_key.encode()).decode()
     row.name, row.base_url, row.enabled, row.timeout_seconds = body.name, url, body.enabled, body.timeout_seconds
+    row.parameter_defaults = body.parameter_defaults.compact()
     db.commit()
     return provider_data(row)
 
@@ -152,6 +161,7 @@ class RouteInput(Strict):
     provider_id: str = Field(min_length=1, max_length=64)
     upstream_model: str = Field(min_length=1, max_length=200)
     enabled: bool = True
+    parameter_overrides: ModelParameters = Field(default_factory=ModelParameters)
 
 
 @admin.get("/routes")
@@ -163,6 +173,7 @@ def routes(db=Depends(get_db)):
             "provider_id": r.provider_id,
             "upstream_model": r.upstream_model,
             "enabled": r.enabled,
+            "parameter_overrides": r.parameter_overrides or {},
         }
         for r in db.scalars(select(ModelRoute).order_by(ModelRoute.alias))
     ]
@@ -176,7 +187,9 @@ def save_route(body, db, row=None):
     if row and row.alias != body.alias:
         raise ApiError(409, "ALIAS_IMMUTABLE", "模型别名不可改名，请新建路由并更新用户授权")
     row = row or ModelRoute()
-    for key, value in body.model_dump().items():
+    values = body.model_dump()
+    values["parameter_overrides"] = body.parameter_overrides.compact()
+    for key, value in values.items():
         setattr(row, key, value)
     db.add(row)
     db.commit()
@@ -273,6 +286,25 @@ def calls(offset: int = 0, db=Depends(get_db)):
     return [{c.name: getattr(r, c.name) for c in ModelCall.__table__.columns} for r in rows]
 
 
+@admin.get("/calls/{ident}")
+def call_detail(ident: str, db=Depends(get_db)):
+    call = get(db, ModelCall, ident)
+    db.execute(delete(ModelCallDetail).where(ModelCallDetail.expires_at <= time.time()))
+    db.commit()
+    row = db.get(ModelCallDetail, ident)
+    detail = None
+    if row:
+        try:
+            detail = json.loads(cipher().decrypt(row.encrypted_content.encode()))
+        except InvalidToken:
+            raise ApiError(503, "DETAIL_DECRYPT_FAILED", "详情解密失败，请检查加密主密钥")
+    return {
+        "call": {c.name: getattr(call, c.name) for c in ModelCall.__table__.columns},
+        "detail": detail,
+        "expires_at": row.expires_at if row else None,
+    }
+
+
 def usage(call, data):
     value = data.get("usage")
     if isinstance(value, dict):
@@ -280,6 +312,11 @@ def usage(call, data):
             count = value.get(source)
             if type(count) is int and 0 <= count <= 10**9:
                 setattr(call, target, count)
+
+
+def finish_reason(choice):
+    value = choice.get("finish_reason")
+    return value if value in ("stop", "length", "tool_calls", "function_call", "content_filter") else "other"
 
 
 ALLOWED = {
@@ -329,6 +366,18 @@ async def completions(request: Request, key=Depends(require_key), db=Depends(get
     if not provider.enabled:
         raise ApiError(503, "PROVIDER_DISABLED")
     url, raw_key = destination(provider.base_url), secret(provider)
+    try:
+        request_parameters = validate_call_parameters(body)
+        effective_parameters = merge_parameters(
+            provider.parameter_defaults,
+            request_parameters,
+            route.parameter_overrides,
+        )
+    except ValueError:
+        raise ApiError(422, "INVALID_MODEL_PARAMETERS", "模型高级参数组合无效")
+    for name in request_parameters:
+        body.pop(name, None)
+    body.update(effective_parameters)
     body["model"] = route.upstream_model
     call = ModelCall(key_id=key.id, owner=key.owner, provider_id=provider.id, model=alias, started_at=time.time())
     db.add(call)
@@ -337,6 +386,23 @@ async def completions(request: Request, key=Depends(require_key), db=Depends(get
     response = None
     transferred = False
     acquired = False
+    captured_output = None
+    finish_reasons = []
+    stream_output = {}
+    capture = settings().model_call_capture_enabled
+    secrets = (raw_key, request.headers.get("authorization", "")[7:])
+    raw_client_timeout = request.headers.get("x-opsark-timeout-seconds")
+    try:
+        client_timeout = int(raw_client_timeout) if raw_client_timeout is not None else None
+    except ValueError:
+        client_timeout = None
+    # A desktop model profile owns its request deadline. The provider value is
+    # only the fallback for callers that do not send a bounded deadline.
+    effective_timeout = (
+        max(1, min(client_timeout, 900))
+        if client_timeout is not None
+        else provider.timeout_seconds
+    )
 
     def finish(status, code=None, http_status=None):
         call.status, call.error_code = status, code
@@ -344,6 +410,32 @@ async def completions(request: Request, key=Depends(require_key), db=Depends(get
             call.http_status = http_status
         call.duration_ms = int((time.monotonic() - started) * 1000)
         db.commit()
+        # Failure of optional diagnostics must not turn a successful model call into a failure.
+        try:
+            with db.begin_nested():
+                db.execute(delete(ModelCallDetail).where(ModelCallDetail.expires_at <= time.time()))
+                if capture:
+                    detail = {
+                        "input": snapshot(body, secrets),
+                        "output": snapshot(captured_output, secrets),
+                        "finish_reasons": finish_reasons,
+                        "stream": bool(body.get("stream")),
+                    }
+                    db.merge(
+                        ModelCallDetail(
+                            call_id=call.id,
+                            encrypted_content=cipher()
+                            .encrypt(json.dumps(detail, ensure_ascii=False).encode())
+                            .decode(),
+                            expires_at=time.time() + max(1, min(settings().model_call_retention_days, 90)) * 86400,
+                        )
+                    )
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            logging.getLogger(__name__).error(
+                "call_detail_save_failed request_id=%s exception_type=%s", call.id, type(exc).__name__
+            )
 
     try:
         await asyncio.wait_for(request.app.state.model_slots.acquire(), timeout=1)
@@ -356,11 +448,24 @@ async def completions(request: Request, key=Depends(require_key), db=Depends(get
                 "Authorization": "Bearer " + raw_key,
                 "Accept": "text/event-stream" if body.get("stream") else "application/json",
             },
-            timeout=provider.timeout_seconds,
+            timeout=effective_timeout,
         )
         response = await request.app.state.model_client.send(upstream, stream=True)
         call.http_status = response.status_code
         if response.status_code != 200:
+            if capture:
+                error_body = bytearray()
+                try:
+                    async with asyncio.timeout(effective_timeout):
+                        async for part in response.aiter_bytes():
+                            error_body.extend(part)
+                            if len(error_body) > 64 * 1024:
+                                break
+                    # Do not persist a cut credential or an HTML proxy error page.
+                    if len(error_body) <= 64 * 1024:
+                        captured_output = json.loads(error_body)
+                except (ValueError, httpx.HTTPError, TimeoutError):
+                    captured_output = {"note": "错误正文不是有效 JSON，或读取超时；未保存"}
             finish("failed", "UPSTREAM_HTTP_ERROR")
             return JSONResponse(
                 {"error": {"code": "UPSTREAM_HTTP_ERROR", "message": "模型供应商请求失败", "request_id": call.id}},
@@ -372,11 +477,12 @@ async def completions(request: Request, key=Depends(require_key), db=Depends(get
                 raise ValueError("invalid stream")
 
             async def events():
+                nonlocal captured_output
                 total = 0
                 pending = b""
                 done = False
                 try:
-                    async with asyncio.timeout(provider.timeout_seconds):
+                    async with asyncio.timeout(effective_timeout):
                         async for part in response.aiter_bytes():
                             total += len(part)
                             if total > 16 * 1024 * 1024:
@@ -404,6 +510,36 @@ async def completions(request: Request, key=Depends(require_key), db=Depends(get
                                     raise ValueError("invalid stream event")
                                 data["model"] = alias
                                 usage(call, data)
+                                for choice in data["choices"]:
+                                    if not isinstance(choice, dict):
+                                        raise ValueError("invalid choice")
+                                    if choice.get("finish_reason"):
+                                        finish_reasons.append(finish_reason(choice))
+                                    if capture:
+                                        entry = stream_output.setdefault(
+                                            str(choice.get("index", 0)),
+                                            {"content": "", "reasoning_content": "", "tool_calls": {}},
+                                        )
+                                        delta = choice.get("delta") or {}
+                                        if not isinstance(delta, dict):
+                                            raise ValueError("invalid delta")
+                                        for field in ("content", "reasoning_content"):
+                                            if isinstance(delta.get(field), str):
+                                                entry[field] += delta[field]
+                                        for tool in delta.get("tool_calls") or []:
+                                            if not isinstance(tool, dict) or not isinstance(
+                                                tool.get("function", {}), dict
+                                            ):
+                                                raise ValueError("invalid tool delta")
+                                            target = entry["tool_calls"].setdefault(
+                                                str(tool.get("index", 0)), {"name": "", "arguments": ""}
+                                            )
+                                            for field in ("name", "arguments"):
+                                                value = (tool.get("function") or {}).get(field) or ""
+                                                if not isinstance(value, str):
+                                                    raise ValueError("invalid tool text")
+                                                target[field] += value
+                                captured_output = stream_output if capture else None
                                 yield "data: " + json.dumps(data, ensure_ascii=False) + "\n\n"
                         if not done:
                             raise ValueError("incomplete stream")
@@ -424,12 +560,14 @@ async def completions(request: Request, key=Depends(require_key), db=Depends(get
                 events(), media_type="text/event-stream", headers={"X-Request-ID": call.id, "X-Accel-Buffering": "no"}
             )
         data_bytes = bytearray()
-        async with asyncio.timeout(provider.timeout_seconds):
+        async with asyncio.timeout(effective_timeout):
             async for part in response.aiter_bytes():
                 data_bytes.extend(part)
                 if len(data_bytes) > 8 * 1024 * 1024:
                     raise ValueError("response too large")
+        captured_output = data_bytes.decode("utf-8", errors="replace") if capture else None
         data = json.loads(data_bytes)
+        captured_output = data if capture else None
         if (
             not isinstance(data, dict)
             or "error" in data
@@ -442,6 +580,7 @@ async def completions(request: Request, key=Depends(require_key), db=Depends(get
             raise ValueError("invalid response")
         data["model"] = alias
         usage(call, data)
+        finish_reasons.extend(finish_reason(c) for c in data["choices"] if c.get("finish_reason"))
         finish("succeeded")
         return JSONResponse(data, headers={"X-Request-ID": call.id})
     except asyncio.CancelledError:

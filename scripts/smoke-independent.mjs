@@ -19,7 +19,7 @@ const python=root=>join(root,".venv",process.platform==="win32"?"Scripts/python.
 async function port(){const s=createServer();await new Promise(r=>s.listen(0,"127.0.0.1",r));const p=s.address().port;await new Promise(r=>s.close(r));return p;}
 async function start(root,module,name){
  const p=await port(),base="http://127.0.0.1:"+p;
- const env={...process.env,DATABASE_URL:"sqlite:///"+join(directory,name+".db").replaceAll("\\","/"),TEST_PASSWORD:password,KNOWLEDGE_SERVICE_TOKEN:"",ALLOWED_ORIGINS:base,COOKIE_SECURE:"false",MODEL_KEY_ENCRYPTION_KEY:randomBytes(32).toString("base64url")+"=",MODEL_ALLOWED_HOSTS:"one.example"};
+ const env={...process.env,DATABASE_URL:"sqlite:///"+join(directory,name+".db").replaceAll("\\","/"),TEST_PASSWORD:password,KNOWLEDGE_SERVICE_TOKEN:"",ALLOWED_ORIGINS:base,COOKIE_SECURE:"false",MODEL_KEY_ENCRYPTION_KEY:randomBytes(32).toString("base64url")+"="};
  execFileSync(python(root),["-m","alembic","upgrade","head"],{cwd:root,env,stdio:"pipe",windowsHide:true});
  const setup=name==="admin"?'from app.db import SessionLocal; from app.models import Admin':'from knowledge.db import SessionLocal; from knowledge.models import KnowledgeAdmin as Admin';
  execFileSync(python(root),["-c",setup+'; import os; from argon2 import PasswordHasher; db=SessionLocal(); db.add(Admin(username="smoke",password_hash=PasswordHasher().hash(os.environ["TEST_PASSWORD"]))); db.commit(); db.close()'],{cwd:root,env,stdio:"pipe",windowsHide:true});
