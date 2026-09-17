@@ -10,8 +10,10 @@ from .models import LoginSession
 
 
 class ApiError(Exception):
-    def __init__(self, status: int, code: str, message: str = "请求无法完成", fields=None):
+    def __init__(self, status: int, code: str, message: str = "请求无法完成", fields=None,
+                 *, details=None, retryable=None):
         self.status, self.code, self.message, self.fields = status, code, message, fields or []
+        self.details, self.retryable = details, retryable
 
 
 def digest(value: str | bytes):
@@ -60,4 +62,3 @@ def require_admin(request: Request, db=Depends(get_db)):
         if not secrets.compare_digest(request.headers.get("x-csrf-token", ""), session.csrf):
             raise ApiError(403, "CSRF_DENIED")
     return session
-

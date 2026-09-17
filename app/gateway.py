@@ -4,20 +4,28 @@ import asyncio
 import ipaddress
 import json
 import logging
+import re
 import time
 from urllib.parse import urlsplit
+
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select, delete
-from .config import settings
-from .db import get_db
-from .models import Provider, ModelRoute, ModelKey, ModelCall, ModelCallDetail
+from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
+
+from .accounts import model_identity
 from .call_details import snapshot
+from .call_monitor import call_data, trace_metadata
+from .config import settings
+from .credits import begin_direct_call, settle
+from .db import get_db
 from .model_parameters import ModelParameters, merge_parameters, validate_call_parameters
-from .security import ApiError, digest, token, limiter, require_admin
+from .models import ModelCall, ModelCallDetail, ModelKey, ModelRoute, Provider
+from .security import ApiError, digest, limiter, require_admin, token
+from .user_models import AccountAudit, UserAccount
 
 admin = APIRouter(prefix="/api/admin/v1", dependencies=[Depends(require_admin)])
 public = APIRouter(prefix="/v1")
@@ -157,6 +165,7 @@ async def test_provider(ident: str, request: Request, db=Depends(get_db)):
 
 
 class RouteInput(Strict):
+    display_name: str = Field(default="", max_length=100)
     alias: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._/-]+$")
     provider_id: str = Field(min_length=1, max_length=64)
     upstream_model: str = Field(min_length=1, max_length=200)
@@ -170,6 +179,7 @@ def routes(db=Depends(get_db)):
         {
             "id": r.id,
             "alias": r.alias,
+            "display_name": r.display_name or r.alias,
             "provider_id": r.provider_id,
             "upstream_model": r.upstream_model,
             "enabled": r.enabled,
@@ -257,6 +267,8 @@ def revoke_key(ident: str, db=Depends(get_db)):
 
 def require_key(request: Request, db=Depends(get_db)):
     header = request.headers.get("authorization", "")
+    if header.startswith("Bearer ouc_"):
+        return model_identity(request, db)
     key = (
         db.scalar(select(ModelKey).where(ModelKey.token_hash == digest(header[7:])))
         if header.startswith("Bearer omk_")
@@ -275,7 +287,7 @@ def model_list(key=Depends(require_key), db=Depends(get_db)):
         .join(Provider)
         .where(ModelRoute.enabled.is_(True), Provider.enabled.is_(True), ModelRoute.alias.in_(key.allowed_models))
     )
-    return {"object": "list", "data": [{"id": r.alias, "object": "model", "owned_by": "opsark"} for r in rows]}
+    return {"object": "list", "data": [{"id": r.alias, "name": r.display_name or r.alias, "object": "model", "owned_by": "opsark"} for r in rows]}
 
 
 @admin.get("/calls")
@@ -287,7 +299,7 @@ def calls(offset: int = 0, db=Depends(get_db)):
 
 
 @admin.get("/calls/{ident}")
-def call_detail(ident: str, db=Depends(get_db)):
+def call_detail(ident: str, session=Depends(require_admin), db=Depends(get_db)):
     call = get(db, ModelCall, ident)
     db.execute(delete(ModelCallDetail).where(ModelCallDetail.expires_at <= time.time()))
     db.commit()
@@ -298,9 +310,15 @@ def call_detail(ident: str, db=Depends(get_db)):
             detail = json.loads(cipher().decrypt(row.encrypted_content.encode()))
         except InvalidToken:
             raise ApiError(503, "DETAIL_DECRYPT_FAILED", "详情解密失败，请检查加密主密钥")
+    db.add(AccountAudit(actor_id=session.admin_id, action="model_call_viewed",
+                        detail={"call_id": ident, "user_id": call.user_id, "task_id": call.task_id,
+                                "snapshot_available": detail is not None}, created_at=time.time()))
+    db.commit()
     return {
-        "call": {c.name: getattr(call, c.name) for c in ModelCall.__table__.columns},
+        "call": call_data(call, db.scalar(select(UserAccount.email).where(UserAccount.id == call.user_id)),
+                          db.scalar(select(Provider.name).where(Provider.id == call.provider_id))),
         "detail": detail,
+        "detail_policy": "redacted_snapshot",
         "expires_at": row.expires_at if row else None,
     }
 
@@ -357,6 +375,17 @@ async def completions(request: Request, key=Depends(require_key), db=Depends(get
     ):
         raise ApiError(422, "INVALID_CHAT_REQUEST")
     alias = body["model"]
+    user_id = getattr(key, "user_id", None)
+    request_hash = digest(json.dumps(body, sort_keys=True, ensure_ascii=False))
+    idempotency_key = request.headers.get("idempotency-key", "")
+    if user_id:
+        if not re.fullmatch(r"[a-zA-Z0-9_-]{16,128}", idempotency_key):
+            raise ApiError(422, "IDEMPOTENCY_KEY_REQUIRED", "官方模型调用必须携带请求标识")
+        if body.get("stream"):
+            raise ApiError(422, "USER_STREAM_NOT_SUPPORTED", "当前官方模型仅支持非流式调用")
+        if any(not isinstance(m, dict) or not isinstance(m.get("content"), str)
+               or m.get("role") not in {"system", "user", "assistant"} for m in body["messages"]):
+            raise ApiError(422, "UNSUPPORTED_MESSAGE", "当前官方模型只接受文本消息")
     if alias not in key.allowed_models:
         raise ApiError(403, "MODEL_DENIED")
     route = db.scalar(select(ModelRoute).where(ModelRoute.alias == alias, ModelRoute.enabled.is_(True)))
@@ -379,9 +408,45 @@ async def completions(request: Request, key=Depends(require_key), db=Depends(get
         body.pop(name, None)
     body.update(effective_parameters)
     body["model"] = route.upstream_model
-    call = ModelCall(key_id=key.id, owner=key.owner, provider_id=provider.id, model=alias, started_at=time.time())
+    if user_id:
+        output_field = "max_completion_tokens" if "max_completion_tokens" in body else "max_tokens"
+        max_output = body.get(output_field, 4096)
+        if type(max_output) is not int or not 1 <= max_output <= 16384:
+            raise ApiError(422, "OUTPUT_LIMIT", "官方模型输出上限为 16384 Token")
+        body.pop("max_tokens", None)
+        body.pop("max_completion_tokens", None)
+        body[output_field] = max_output
+        # This is a request-size safety limit, not a token estimator.
+        input_size = len(json.dumps(body, ensure_ascii=False).encode())
+        if input_size > 256 * 1024:
+            raise ApiError(413, "OFFICIAL_CONTEXT_TOO_LARGE", "官方模型单次上下文过大")
+    call = ModelCall(key_id=key.id, owner=key.owner, user_id=user_id, provider_id=provider.id,
+                     model=alias, started_at=time.time(), **trace_metadata(request))
     db.add(call)
-    db.commit()
+    try:
+        db.flush()
+        if user_id:
+            begin_direct_call(db, user_id, call.id, idempotency_key, request_hash)
+        db.commit()
+    except ApiError as error:
+        db.rollback()
+        if error.code in {"INSUFFICIENT_CREDITS", "CREDITS_RECONCILIATION_REQUIRED"}:
+            # Admission failures consume no credits. Preserve metadata only in
+            # a separate transaction so the monitor can explain denied calls.
+            call.status, call.error_code, call.http_status = "failed", error.code, error.status
+            call.duration_ms = 0
+            try:
+                db.add(call)
+                db.commit()
+                error.details = {**(error.details or {}), "request_id": call.id}
+            except Exception as audit_error:  # noqa: BLE001 - optional audit must not hide the admission error
+                db.rollback()
+                logging.getLogger(__name__).error("credit_rejection_audit_failed exception_type=%s",
+                                                 type(audit_error).__name__)
+        raise
+    except IntegrityError:
+        db.rollback()
+        raise ApiError(409, "REQUEST_ALREADY_ACCEPTED", "请求已受理，请先核对调用记录")
     started = time.monotonic()
     response = None
     transferred = False
@@ -389,7 +454,10 @@ async def completions(request: Request, key=Depends(require_key), db=Depends(get
     captured_output = None
     finish_reasons = []
     stream_output = {}
+    # All accepted gateway calls, including official user calls, share the
+    # server-side redacted/encrypted capture policy. Never collect HTTP headers.
     capture = settings().model_call_capture_enabled
+    dispatched = False
     secrets = (raw_key, request.headers.get("authorization", "")[7:])
     raw_client_timeout = request.headers.get("x-opsark-timeout-seconds")
     try:
@@ -409,6 +477,11 @@ async def completions(request: Request, key=Depends(require_key), db=Depends(get
         if http_status is not None:
             call.http_status = http_status
         call.duration_ms = int((time.monotonic() - started) * 1000)
+        if user_id:
+            actual = call.input_tokens + call.output_tokens if (
+                status == "succeeded" and call.input_tokens is not None and call.output_tokens is not None
+            ) else None
+            settle(db, call.id, actual, no_dispatch=not dispatched)
         db.commit()
         # Failure of optional diagnostics must not turn a successful model call into a failure.
         try:
@@ -450,6 +523,7 @@ async def completions(request: Request, key=Depends(require_key), db=Depends(get
             },
             timeout=effective_timeout,
         )
+        dispatched = True
         response = await request.app.state.model_client.send(upstream, stream=True)
         call.http_status = response.status_code
         if response.status_code != 200:

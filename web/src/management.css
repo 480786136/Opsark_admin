@@ -1,0 +1,348 @@
+.management-panel {
+  max-width: 100%;
+  font-variant-numeric: tabular-nums;
+}
+.panel-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 0 0 16px;
+}
+.panel-toolbar h2 {
+  margin: 0;
+}
+.panel-toolbar p {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+.subnav {
+  display: flex;
+  gap: 6px;
+  border-bottom: 1px solid #dce4e0;
+  margin: 0 0 18px;
+  padding-bottom: 10px;
+}
+.subnav button {
+  background: transparent;
+  color: #60736b;
+  border: 1px solid transparent;
+  padding: 8px 14px;
+}
+.subnav button[aria-pressed="true"] {
+  background: #e7f1ed;
+  color: #195e48;
+  border-color: #c7ded3;
+}
+.compact-filter {
+  margin: 0 0 16px;
+}
+.compact-filter fieldset {
+  display: flex;
+  gap: 10px;
+  align-items: end;
+  flex-wrap: wrap;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.compact-filter label {
+  margin: 0;
+  min-width: 110px;
+  max-width: 190px;
+  flex: 1;
+  font-size: 12px;
+}
+.compact-filter .grow {
+  max-width: none;
+  min-width: 260px;
+  flex: 2;
+}
+.compact-filter :is(input, select) {
+  margin-top: 5px;
+  padding: 8px;
+  width: 100%;
+  min-height: 36px;
+}
+.summary-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  background: #fff;
+  border: 1px solid #e0e6e2;
+  border-radius: 8px;
+  margin: 16px 0;
+  overflow: hidden;
+}
+.summary-strip > div {
+  padding: 14px 18px;
+  border-right: 1px solid #e0e6e2;
+}
+.summary-strip > div:last-child {
+  border: 0;
+}
+.summary-strip span {
+  display: block;
+  font-size: 12px;
+  color: #65766d;
+}
+.summary-strip strong {
+  display: block;
+  font-size: 20px;
+  line-height: 1.5;
+  margin-top: 5px;
+  letter-spacing: -0.4px;
+}
+.table-note {
+  font-size: 12px;
+  line-height: 1.65;
+  color: #6a776f;
+  margin: 12px 0;
+}
+.data-grid {
+  width: 100%;
+  overflow: auto;
+  border: 1px solid #dfe6e1;
+  border-radius: 7px;
+  background: #fff;
+}
+.data-grid table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  font-size: 12px;
+}
+.data-grid th {
+  font-weight: 600;
+  background: #f4f7f5;
+  color: #64736c;
+  white-space: nowrap;
+}
+.data-grid td,
+.data-grid th {
+  padding: 11px 12px;
+  border-bottom: 1px solid #e8ece9;
+}
+.data-grid tbody tr:last-child td {
+  border-bottom: 0;
+}
+.data-grid tbody tr:hover {
+  background: #f7faf8;
+}
+.data-grid small {
+  display: block;
+  font-size: 11px;
+  color: #76847c;
+  margin-top: 5px;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.data-grid button.secondary {
+  padding: 6px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.text-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #23684f;
+  font-size: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.text-link:hover {
+  text-decoration: underline;
+  background: transparent;
+}
+.id-link {
+  display: block;
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.status-label {
+  color: #34705a;
+}
+.status-label[data-status="failed"] {
+  color: #a44539;
+}
+.status-label[data-status="running"] {
+  color: #8f6f28;
+}
+.panel-empty {
+  padding: 28px 20px;
+  text-align: center;
+  background: #f6f8f6;
+  color: #6b7c71;
+  font-size: 13px;
+  border-radius: 7px;
+}
+.panel-pagination {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin: 16px 0;
+  font-size: 12px;
+}
+.panel-pagination button {
+  width: auto;
+  margin: 0;
+  padding: 7px 12px;
+  text-align: center;
+}
+.panel-pagination label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+}
+.panel-pagination select {
+  width: auto;
+  margin: 0;
+  padding: 6px;
+}
+.detail-breadcrumb {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+  margin-bottom: 18px;
+  color: #76847a;
+}
+.detail-dialog {
+  border: 1px solid #d2dfd7;
+  border-radius: 12px;
+  padding: 0;
+  width: min(640px, calc(100vw - 40px));
+  max-height: 88dvh;
+  color: #25382e;
+  background: #fff;
+  box-shadow: 0 24px 80px #142c2633;
+}
+.detail-dialog.wide {
+  width: min(1100px, calc(100vw - 40px));
+}
+.detail-dialog::backdrop {
+  background: #182f2859;
+}
+.dialog-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  position: sticky;
+  top: 0;
+  background: #fff;
+  padding: 16px 22px;
+  border-bottom: 1px solid #e0e6e2;
+  z-index: 1;
+}
+.dialog-heading h2 {
+  margin: 0;
+}
+.dialog-body {
+  padding: 20px 22px;
+}
+.metadata-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px 24px;
+  margin: 0 0 20px;
+}
+.metadata-grid dt {
+  font-size: 12px;
+  color: #6a7b70;
+}
+.metadata-grid dd {
+  font-size: 13px;
+  margin: 5px 0 0;
+  overflow-wrap: anywhere;
+}
+.payload-view {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 16px;
+  max-height: 50dvh;
+  overflow: auto;
+  background: #f5f7f5;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.65;
+}
+.request-lookup {
+  display: flex;
+  align-items: end;
+  gap: 10px;
+  max-width: 560px;
+  margin: 16px 0;
+}
+.request-lookup label {
+  margin: 0;
+  flex: 1;
+  font-size: 12px;
+}
+.request-lookup input {
+  margin-top: 5px;
+}
+.management-panel :is(button, input, select, textarea):focus-visible,
+.detail-dialog :is(button, input, select, textarea):focus-visible {
+  outline: 2px solid #36856a;
+  outline-offset: 3px;
+}
+@media (max-width: 850px) {
+  .summary-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .metadata-grid {
+    grid-template-columns: 1fr;
+  }
+  .panel-pagination {
+    flex-wrap: wrap;
+  }
+  .compact-filter .grow {
+    min-width: 100%;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .management-panel * {
+    scroll-behavior: auto;
+  }
+}
+.data-grid .text-link,
+.detail-breadcrumb .text-link,
+.metadata-grid .text-link {
+  min-height: 0;
+  line-height: 1.4;
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
+}
+.data-grid .text-link:hover,
+.detail-breadcrumb .text-link:hover,
+.metadata-grid .text-link:hover {
+  background: transparent;
+  color: #174f3c;
+}
+.data-grid button.secondary {
+  min-height: 30px;
+}
+.data-grid td {
+  padding-top: 9px;
+  padding-bottom: 9px;
+}
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.panel-toolbar {
+  flex-wrap: wrap;
+}
+.dialog-body form > h2 {
+  margin-top: 0;
+}

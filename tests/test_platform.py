@@ -67,4 +67,8 @@ def test_platform_owns_no_knowledge_tables():
         "model_keys",
         "model_calls",
         "model_call_details",
+        "user_accounts", "user_sessions", "registration_policy", "credit_accounts",
+        "credit_ledger", "model_reservations", "account_audit",
+        "user_skills", "cloud_mutations", "support_tickets", "client_policy", "client_releases", "github_identities", "github_flows",
+        "official_content_drafts", "official_content_releases",
     }

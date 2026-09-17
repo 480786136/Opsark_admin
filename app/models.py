@@ -34,6 +34,7 @@ class ModelRoute(Base):
     __tablename__ = "model_routes"
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: uuid.uuid4().hex)
     alias: Mapped[str] = mapped_column(String(128), unique=True)
+    display_name: Mapped[str] = mapped_column(String(100), default="")
     provider_id: Mapped[str] = mapped_column(ForeignKey("model_providers.id"))
     upstream_model: Mapped[str] = mapped_column(String(200))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -57,6 +58,13 @@ class ModelCall(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True, default=lambda: uuid.uuid4().hex)
     key_id: Mapped[str] = mapped_column(String(64), index=True)
     owner: Mapped[str] = mapped_column(String(128))
+    user_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    task_id: Mapped[str | None] = mapped_column(String(128), index=True)
+    round_id: Mapped[str | None] = mapped_column(String(128))
+    step_id: Mapped[str | None] = mapped_column(String(128))
+    operation: Mapped[str | None] = mapped_column(String(40))
+    phase_index: Mapped[int | None] = mapped_column(Integer)
+    client_request_id: Mapped[str | None] = mapped_column(String(128), index=True)
     provider_id: Mapped[str] = mapped_column(String(64))
     model: Mapped[str] = mapped_column(String(128))
     started_at: Mapped[float] = mapped_column(Float, index=True)
@@ -73,3 +81,7 @@ class ModelCallDetail(Base):
     call_id: Mapped[str] = mapped_column(ForeignKey("model_calls.id"), primary_key=True)
     encrypted_content: Mapped[str] = mapped_column(Text)
     expires_at: Mapped[float] = mapped_column(Float, index=True)
+
+
+from . import user_models  # noqa: E402,F401 -- register independent user-domain metadata
+from . import cloud_models  # noqa: E402,F401 -- user-owned cloud resources

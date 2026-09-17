@@ -15,6 +15,9 @@ from .config import settings
 from .db import get_db
 from .models import Admin, LoginSession
 from .security import ApiError, check_origin, digest, limiter, require_admin, token
+from .log_privacy import install as install_log_privacy
+
+install_log_privacy()
 
 
 @asynccontextmanager
@@ -43,7 +46,12 @@ class LoginInput(BaseModel):
 
 @app.exception_handler(ApiError)
 async def error(request, exc):
-    return JSONResponse({"error": {"code": exc.code, "message": exc.message}}, status_code=exc.status)
+    payload = {"code": exc.code, "message": exc.message}
+    if exc.details is not None:
+        payload["details"] = exc.details
+    if exc.retryable is not None:
+        payload["retryable"] = exc.retryable
+    return JSONResponse({"error": payload}, status_code=exc.status)
 
 
 @app.exception_handler(RequestValidationError)
@@ -119,9 +127,29 @@ def retired_knowledge(path: str, session=Depends(require_admin)):
 
 
 from .gateway import admin as model_admin, public as model_public  # noqa: E402
+from .accounts import admin as accounts_admin, public as accounts_public  # noqa: E402
 
 app.include_router(model_admin)
 app.include_router(model_public)
+app.include_router(accounts_admin)
+app.include_router(accounts_public)
+from .skill_sync import router as skill_router  # noqa: E402
+from .feedback import user as feedback_user, admin as feedback_admin  # noqa: E402
+from .client_updates import public as client_public, admin as client_admin  # noqa: E402
+app.include_router(skill_router)
+app.include_router(feedback_user)
+app.include_router(feedback_admin)
+app.include_router(client_public)
+app.include_router(client_admin)
+from .github_auth import router as github_router  # noqa: E402
+app.include_router(github_router)
+from .official_models import router as official_models_router  # noqa: E402
+app.include_router(official_models_router)
+from .official_content import admin as content_admin, public as content_public  # noqa: E402
+app.include_router(content_admin)
+app.include_router(content_public)
+from .call_monitor import router as call_monitor_router  # noqa: E402
+app.include_router(call_monitor_router)
 
 web = Path(__file__).resolve().parent.parent / "web" / "dist"
 if web.is_dir():

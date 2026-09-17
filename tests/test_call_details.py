@@ -2,14 +2,19 @@ import json
 import time
 
 import httpx
+from test_gateway import env as source_env
+from test_gateway import mock, request
+from test_gateway import setup as source_setup
 
+from app.call_details import snapshot
 from app.config import settings
 from app.db import get_db
 from app.gateway import cipher
 from app.main import app
 from app.models import ModelCallDetail
-from app.call_details import snapshot
-from test_gateway import setup, env, mock, request  # noqa: F401
+
+env = source_env
+setup = source_setup
 
 
 def test_details_encrypted_redacted_and_expiring(setup):
@@ -58,10 +63,22 @@ def test_snapshot_bounds_and_secrets():
     value = snapshot(
         {
             "api_key": "hidden",
+            "refresh_token": "hidden-refresh",
             "content": "Bearer abc password='has spaces' https://user:pass@example.com sk-private omk_private",
+            "tokens": "ouc_private our_private refresh_token='refresh value'",
         }
     )
-    for secret in ("hidden", "abc", "has spaces", "user:pass", "sk-private", "omk_private"):
+    for secret in (
+        "hidden",
+        "abc",
+        "has spaces",
+        "user:pass",
+        "sk-private",
+        "omk_private",
+        "ouc_private",
+        "our_private",
+        "refresh value",
+    ):
         assert secret not in value["text"]
     assert snapshot("中" * 100000)["truncated"]
     assert len(snapshot("中" * 100000)["text"].encode()) <= 64 * 1024
@@ -97,7 +114,11 @@ def test_snapshot_failure_does_not_break_call(setup, monkeypatch):
 
 def test_http_failure_snapshot_filters_upstream_key(setup):
     client, _, _, _, issued = setup
-    mock(lambda r: httpx.Response(429, json={"error": {"message": "rejected synthetic-upstream-private", "api_key": "secret"}}))
+    mock(
+        lambda r: httpx.Response(
+            429, json={"error": {"message": "rejected synthetic-upstream-private", "api_key": "secret"}}
+        )
+    )
     result = request(client, issued)
     assert result.status_code == 429
     detail = client.get("/api/admin/v1/calls/" + result.headers["x-request-id"]).json()

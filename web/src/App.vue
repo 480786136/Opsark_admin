@@ -1,6 +1,10 @@
 <script setup>
 import { ref, reactive, computed, onMounted, nextTick, watch } from "vue";
 import WorkDrawer from "./WorkDrawer.vue";
+import UsersPanel from "./UsersPanel.vue";
+import CallMonitor from "./CallMonitor.vue";
+import CloudPanel from "./CloudPanel.vue";
+import OfficialContentPanel from "./OfficialContentPanel.vue";
 const user = ref(null),
   csrf = ref(""),
   busy = ref(false),
@@ -10,10 +14,18 @@ const user = ref(null),
 const providers = ref([]),
   routes = ref([]),
   keys = ref([]),
-  calls = ref([]),
   config = ref({});
-const freshKey = ref(""),
-  offset = ref(0);
+const freshKey = ref("");
+const monitorScope = ref({}),
+  selectedUserId = ref("");
+function showMonitor(scope = {}) {
+  monitorScope.value = scope;
+  tab.value = "calls";
+}
+function showUser(id) {
+  selectedUserId.value = id;
+  tab.value = "users";
+}
 const providerDrawer = ref(null),
   routeDrawer = ref(null);
 const editingProviderId = ref("");
@@ -148,6 +160,7 @@ const provider = reactive({
 });
 const route = reactive({
   id: "",
+  display_name: "",
   alias: "",
   provider_id: "",
   upstream_model: "",
@@ -162,42 +175,6 @@ const keyForm = reactive({
 });
 const baseURL = window.location.origin + "/v1";
 const query = ref("");
-const callDetail = ref(null),
-  callDialog = ref(null),
-  groupBy = ref("model"),
-  requestLookup = ref("");
-async function inspectCall(id, showDialog = true) {
-  callDetail.value = await api("calls/" + encodeURIComponent(id));
-  await nextTick();
-  if (showDialog && !callDialog.value.open) callDialog.value.showModal();
-}
-const callGroups = computed(() => {
-  const groups = new Map();
-  for (const c of calls.value) {
-    const label =
-      groupBy.value === "provider_id"
-        ? providers.value.find((p) => p.id === c.provider_id)?.name ||
-          c.provider_id
-        : c[groupBy.value];
-    const row = groups.get(label) || {
-      label,
-      count: 0,
-      success: 0,
-      input: 0,
-      output: 0,
-      unknownInput: 0,
-      unknownOutput: 0,
-    };
-    row.count++;
-    row.success += c.status === "succeeded" ? 1 : 0;
-    if (c.input_tokens == null) row.unknownInput++;
-    else row.input += c.input_tokens;
-    if (c.output_tokens == null) row.unknownOutput++;
-    else row.output += c.output_tokens;
-    groups.set(label, row);
-  }
-  return [...groups.values()];
-});
 const localPage = ref(0);
 watch([tab, query], () => {
   localPage.value = 0;
@@ -227,11 +204,6 @@ const filterRows = (rows, fields) =>
     localPage.value * 20,
     localPage.value * 20 + 20,
   );
-const sample = computed(() => ({
-  total: calls.value.length,
-  success: calls.value.filter((c) => c.status === "succeeded").length,
-  failed: calls.value.filter((c) => c.status === "failed").length,
-}));
 async function api(path, method = "GET", body) {
   const response = await fetch("/api/admin/v1/" + path, {
     method,
@@ -259,16 +231,9 @@ async function action(fn) {
   }
 }
 async function refresh() {
-  [config.value, providers.value, routes.value, keys.value, calls.value] =
-    await Promise.all(
-      [
-        "config",
-        "providers",
-        "routes",
-        "model-keys",
-        "calls?offset=" + offset.value,
-      ].map((p) => api(p)),
-    );
+  [config.value, providers.value, routes.value, keys.value] = await Promise.all(
+    ["config", "providers", "routes", "model-keys"].map((p) => api(p)),
+  );
 }
 async function signIn() {
   const s = await api("session", "POST", login);
@@ -284,7 +249,6 @@ async function signOut() {
   freshKey.value = "";
   provider.api_key = "";
   keys.value = [];
-  calls.value = [];
 }
 function resetProvider() {
   Object.assign(provider, {
@@ -300,6 +264,7 @@ function resetProvider() {
 function resetRoute() {
   Object.assign(route, {
     id: "",
+    display_name: "",
     alias: "",
     provider_id: "",
     upstream_model: "",
@@ -376,11 +341,18 @@ onMounted(() =>
             ['routes', '模型路由'],
             ['keys', '用户模型 Key'],
             ['calls', '调用监控'],
+            ['users', '用户与额度'],
+            ['system-skills', '系统 Skill'],
+            ['tools', '工具管理'],
+            ['releases', '版本管理'],
+            ['cloud', '联系与反馈'],
           ]"
           :key="id"
           :class="{ active: tab === id }"
           @click="
             tab = id;
+            selectedUserId = '';
+            monitorScope = {};
             freshKey = '';
             provider.api_key = '';
             query = '';
@@ -405,6 +377,11 @@ onMounted(() =>
                 routes: "模型路由",
                 keys: "用户模型 Key",
                 calls: "调用监控",
+                users: "用户与额度",
+                "system-skills": "系统 Skill",
+                tools: "工具管理",
+                releases: "版本管理",
+                cloud: "联系与反馈",
               }[tab]
             }}
           </h1>
@@ -414,18 +391,74 @@ onMounted(() =>
                 providers: "连接模型供应商，安全管理上游接口与凭据。",
                 routes: "将上游模型映射为统一名称，客户端无需感知渠道变化。",
                 keys: "为客户端签发访问凭据，控制可用模型与调用额度。",
-                calls: "了解请求状态与耗时，快速定位调用问题。",
+                calls: "关联用户、任务与模型请求，定位调用失败和用量异常。",
+                users: "配置 Core 官方模型范围，管理用户、体验额度与登录会话。",
+                "system-skills": "维护官方工作流，保存草稿并发布到 Core。",
+                tools: "管理 Core 工具参数、使用说明、启停配置与发布记录。",
+                releases:
+                  "发布各平台的 Core 系统版本、更新说明与官网下载地址。",
+                cloud: "处理用户反馈，配置联系信息与云功能兼容要求。",
               }[tab]
             }}
           </p>
         </div>
-        <button :disabled="busy" @click="action(refresh)">刷新</button>
+        <button
+          v-if="
+            ![
+              'calls',
+              'users',
+              'cloud',
+              'system-skills',
+              'tools',
+              'releases',
+            ].includes(tab)
+          "
+          :disabled="busy"
+          @click="action(refresh)"
+        >
+          刷新
+        </button>
       </header>
       <div class="list-scroll">
         <p v-if="error" class="error" role="alert">{{ error }}</p>
         <p v-if="notice" role="status">{{ notice }}</p>
+        <UsersPanel
+          v-if="tab === 'users'"
+          :api="api"
+          :initial-user-id="selectedUserId"
+          @monitor="showMonitor"
+        />
+        <CallMonitor
+          v-if="tab === 'calls'"
+          :api="api"
+          :scope="monitorScope"
+          @user="showUser"
+        />
+        <CloudPanel
+          v-if="tab === 'cloud' || tab === 'releases'"
+          :key="tab"
+          :api="api"
+          :mode="tab"
+          @user="showUser"
+          @monitor="showMonitor"
+        />
+        <OfficialContentPanel
+          v-if="tab === 'system-skills' || tab === 'tools'"
+          :key="tab"
+          :api="api"
+          :kind="tab === 'system-skills' ? 'skills' : 'tools'"
+        />
         <div
-          v-if="tab !== 'calls'"
+          v-if="
+            ![
+              'calls',
+              'users',
+              'cloud',
+              'system-skills',
+              'tools',
+              'releases',
+            ].includes(tab)
+          "
           class="setup-path"
           aria-label="模型接入流程"
         >
@@ -468,14 +501,26 @@ onMounted(() =>
           <details>
             <summary>接口说明</summary>
             <p>
-              只接受平台签发的模型 Key；不是上游 Key、知识 Key
-              或管理员密码。首版支持 Chat Completions 兼容
-              API，其他协议暂不支持。
+              支持 Core 登录用户的官方模型调用，以及独立的平台模型
+              Key；不接受上游 Key、知识 Key 或管理员密码。当前支持 Chat
+              Completions 兼容 API，其他协议暂不支持。
             </p>
             <p>支持 HTTP/HTTPS、内网 IP 和自定义端口，无需配置主机白名单。</p>
           </details>
         </article>
-        <div v-if="tab !== 'calls'" class="filter-bar">
+        <div
+          v-if="
+            ![
+              'calls',
+              'users',
+              'cloud',
+              'system-skills',
+              'tools',
+              'releases',
+            ].includes(tab)
+          "
+          class="filter-bar"
+        >
           <label
             >搜索当前列表<input
               v-model="query"
@@ -920,6 +965,12 @@ onMounted(() =>
               </header>
               <form id="route-editor" @submit.prevent="action(saveRoute)">
                 <label
+                  >Core 配置名称<input
+                    v-model="route.display_name"
+                    maxlength="100"
+                    placeholder="留空时使用对外模型名"
+                /></label>
+                <label
                   >对外模型名<input
                     v-model="route.alias"
                     :disabled="!!route.id"
@@ -1215,245 +1266,35 @@ onMounted(() =>
             </button>
           </WorkDrawer></template
         >
-        <template v-if="tab === 'calls'"
-          ><WorkDrawer create title="分类统计与请求查询" :error="error" wide>
-            <h2>当前页统计（最多 100 条）</h2>
-            <p>
-              请求 {{ sample.total }} · 成功 {{ sample.success }} · 失败
-              {{ sample.failed }} · 成功比例
-              {{
-                sample.total
-                  ? Math.round((sample.success / sample.total) * 100)
-                  : 0
-              }}%
-            </p>
-            <p>
-              新调用可查看经过敏感信息过滤的输入输出快照，仅管理员可访问，默认保留
-              7 天。历史、关闭采集或已过期的正文不可查看。 Token “未知”不是
-              0，不可直接当作计费账本。接口成功不代表 AI 提炼通过校验。running
-              表示尚无完成记录，进程异常退出也可能留下此状态。
-            </p>
-            <label
-              >当前页分类统计
-              <select v-model="groupBy">
-                <option value="model">按模型</option>
-                <option value="owner">按调用方</option>
-                <option value="provider_id">按供应商</option>
-                <option value="status">按状态</option>
-              </select>
-            </label>
-            <div class="usage-table">
-              <table>
-                <thead>
-                  <tr>
-                    <th>分类</th>
-                    <th>请求 / 接口成功</th>
-                    <th>已知输入 Token</th>
-                    <th>已知输出 Token</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="g in callGroups" :key="g.label">
-                    <td>{{ g.label }}</td>
-                    <td>{{ g.count }} / {{ g.success }}</td>
-                    <td>
-                      {{ g.input
-                      }}<small v-if="g.unknownInput"
-                        >（{{ g.unknownInput }} 条未知）</small
-                      >
-                    </td>
-                    <td>
-                      {{ g.output
-                      }}<small v-if="g.unknownOutput"
-                        >（{{ g.unknownOutput }} 条未知）</small
-                      >
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-            <form
-              @submit.prevent="action(() => inspectCall(requestLookup.trim()))"
-              class="filter-bar"
-            >
-              <input
-                v-model="requestLookup"
-                placeholder="输入 Knowledge 日志中的请求 ID"
-                aria-label="请求 ID"
-                required
-              />
-              <button :disabled="busy">查询调用详情</button>
-            </form>
-          </WorkDrawer>
-          <WorkDrawer
-            :error="error"
-            v-for="c in calls"
-            :key="c.id"
-            :title="'请求 ' + c.id"
-            :summary="
-              c.model +
-              ' · ' +
-              c.owner +
-              ' · ' +
-              (c.duration_ms == null ? '耗时未知' : c.duration_ms + ' ms') +
-              ' · 输入 ' +
-              (c.input_tokens ?? '未知') +
-              ' / 输出 ' +
-              (c.output_tokens ?? '未知')
-            "
-            :status="c.status"
-            @open="action(() => inspectCall(c.id, false))"
-          >
-            <h2>{{ c.model }} · {{ c.status }}</h2>
-            <p>
-              {{ c.owner }} ·
-              {{
-                providers.find((p) => p.id === c.provider_id)?.name ||
-                c.provider_id
-              }}
-              · {{ new Date(c.started_at * 1000).toLocaleString() }}
-            </p>
-            <p>
-              HTTP {{ c.http_status ?? "未知" }} ·
-              {{ c.duration_ms ?? "未知" }} ms · 输入
-              {{ c.input_tokens ?? "未知" }} / 输出
-              {{ c.output_tokens ?? "未知" }}
-            </p>
-            <p v-if="c.error_code">{{ c.error_code }}</p>
-            <small>请求 ID：{{ c.id }}</small>
-            <p v-if="busy && callDetail?.call?.id !== c.id" role="status">
-              正在加载请求快照…
-            </p>
-            <template v-if="callDetail?.call?.id === c.id">
-              <section class="detail-section">
-                <h3>响应概要</h3>
-                <p v-if="callDetail.detail">
-                  结束原因：{{
-                    callDetail.detail.finish_reasons.join(", ") || "未返回"
-                  }}
-                  ·
-                  {{ callDetail.detail.stream ? "流式（合并输出）" : "非流式" }}
-                </p>
-                <p
-                  v-if="callDetail.detail?.finish_reasons.includes('length')"
-                  class="error"
-                  role="alert"
-                >
-                  输出达到模型长度上限，结果可能不完整。
-                </p>
-                <p v-if="callDetail.detail">
-                  脱敏快照保留至
-                  {{
-                    new Date(callDetail.expires_at * 1000).toLocaleString()
-                  }}。
-                </p>
-              </section>
-              <div v-if="callDetail.detail" class="call-panes">
-                <section v-for="side in ['input', 'output']" :key="side">
-                  <h3>
-                    {{ side === "input" ? "请求输入" : "模型输出" }}
-                    <small v-if="callDetail.detail[side].truncated"
-                      >（快照已截短）</small
-                    >
-                  </h3>
-                  <pre>{{ callDetail.detail[side].text }}</pre>
-                </section>
-              </div>
-              <p v-else>
-                没有可用正文：可能是历史调用、未启用采集、已过期或快照保存失败。
-              </p>
-            </template>
-          </WorkDrawer></template
-        >
-        <dialog ref="callDialog" class="call-dialog work-drawer wide">
-          <template v-if="callDetail">
-            <header>
-              <h2>调用详情</h2>
-              <button class="secondary" @click="callDialog.close()">
-                关闭
-              </button>
-            </header>
-            <p>
-              请求 ID：{{ callDetail.call.id }} · {{ callDetail.call.status }} ·
-              HTTP {{ callDetail.call.http_status ?? "未知" }}
-            </p>
-            <p>
-              输入 {{ callDetail.call.input_tokens ?? "未知" }} / 输出
-              {{ callDetail.call.output_tokens ?? "未知" }} Token ·
-              {{ callDetail.call.duration_ms ?? "未知" }} ms
-            </p>
-            <p v-if="callDetail.call.error_code">
-              错误码：{{ callDetail.call.error_code }}
-            </p>
-            <template v-if="callDetail.detail">
-              <p>
-                结束原因：{{
-                  callDetail.detail.finish_reasons.join(", ") || "未返回"
-                }}
-                · {{ callDetail.detail.stream ? "流式（合并输出）" : "非流式" }}
-              </p>
-              <p
-                v-if="callDetail.detail.finish_reasons.includes('length')"
-                role="alert"
-              >
-                输出达到模型长度上限，可能被截断；HTTP 200
-                不表示结果完整。请检查输出预算和提示词长度。
-              </p>
-              <p>
-                快照经过自动过滤（不保证覆盖所有业务敏感信息），加密保存至
-                {{
-                  new Date(callDetail.expires_at * 1000).toLocaleString()
-                }}。仅用于排障，请勿对外分享。
-              </p>
-              <div class="call-panes">
-                <section v-for="side in ['input', 'output']" :key="side">
-                  <h3>
-                    {{ side === "input" ? "请求输入" : "模型输出" }}
-                    <small v-if="callDetail.detail[side].truncated"
-                      >（快照超过 64 KiB，展示已截短）</small
-                    >
-                  </h3>
-                  <pre>{{ callDetail.detail[side].text }}</pre>
-                </section>
-              </div>
-            </template>
-            <p v-else>
-              没有可用正文：可能是历史调用、未启用采集、已过期，或快照保存失败。请结合服务端日志排查。
-            </p>
-          </template>
-        </dialog>
         <p
-          v-if="tab === 'calls' ? !calls.length : !currentRows.length"
+          v-if="
+            ![
+              'calls',
+              'users',
+              'cloud',
+              'system-skills',
+              'tools',
+              'releases',
+            ].includes(tab) && !currentRows.length
+          "
           class="empty-state"
         >
           暂无匹配记录，请调整筛选或新增记录。
         </p>
       </div>
-      <footer v-if="tab === 'calls'" class="list-pagination">
-        <span>第 {{ offset / 100 + 1 }} 页 · 本页 {{ calls.length }} 条</span>
-        <button
-          :disabled="busy || offset === 0"
-          @click="
-            action(async () => {
-              offset = Math.max(0, offset - 100);
-              await refresh();
-            })
-          "
-        >
-          上一页</button
-        ><button
-          :disabled="busy || calls.length < 100"
-          @click="
-            action(async () => {
-              offset += 100;
-              await refresh();
-            })
-          "
-        >
-          下一页
-        </button>
-      </footer>
-      <footer v-if="tab !== 'calls'" class="list-pagination">
+      <footer
+        v-if="
+          ![
+            'calls',
+            'users',
+            'cloud',
+            'system-skills',
+            'tools',
+            'releases',
+          ].includes(tab)
+        "
+        class="list-pagination"
+      >
         <span>{{ currentRows.length }} 条 · 第 {{ localPage + 1 }} 页</span
         ><button
           class="secondary"

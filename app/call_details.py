@@ -4,7 +4,7 @@ import json
 import re
 
 LIMIT = 64 * 1024
-SENSITIVE = re.compile(r"password|passwd|secret|api[_-]?key|authorization|cookie|access[_-]?token", re.I)
+SENSITIVE = re.compile(r"password|passwd|secret|api[_-]?key|authorization|cookie|(?:access|refresh)[_-]?token", re.IGNORECASE)
 
 
 def sanitize(value, secrets=(), depth=0):
@@ -23,9 +23,9 @@ def sanitize(value, secrets=(), depth=0):
         r"-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----", "[REDACTED PRIVATE KEY]", value
     )
     value = re.sub(r"(?i)\bBearer\s+[^\s\"']+", "Bearer [REDACTED]", value)
-    value = re.sub(r"\b(?:sk-|omk_)[A-Za-z0-9_-]+", "[REDACTED]", value)
+    value = re.sub(r"\b(?:sk-|omk_|ouc_|our_)[A-Za-z0-9_-]+", "[REDACTED]", value)
     value = re.sub(
-        r"(?i)((?:password|passwd|secret|api[_-]?key|access[_-]?token)[\"']?\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;}]+)",
+        r"(?i)((?:password|passwd|secret|api[_-]?key|(?:access|refresh)[_-]?token)[\"']?\s*[:=]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;}]+)",
         r"\1[REDACTED]",
         value,
     )
