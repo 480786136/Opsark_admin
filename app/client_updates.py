@@ -98,7 +98,6 @@ class ReleaseInput(Strict):
     version: str = Field(max_length=40)
     notes: str = Field(min_length=1, max_length=8000)
     download_url: str = Field(max_length=2000)
-    sha256: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
 
 
 def public_release(r):
@@ -109,7 +108,6 @@ def public_release(r):
         "version": r.version,
         "notes": r.notes,
         "download_url": r.download_url,
-        "sha256": r.sha256,
         "enabled": r.enabled,
         "created_at": r.created_at,
     }
@@ -130,7 +128,9 @@ def publish(body: ReleaseInput, staff=Depends(require_admin), db=Depends(get_db)
     hosts = {h.strip().lower() for h in settings().release_allowed_hosts.split(",") if h.strip()}
     if urlsplit(body.download_url).hostname not in hosts:
         raise ApiError(422, "RELEASE_HOST_NOT_ALLOWED", "请先在服务端 RELEASE_ALLOWED_HOSTS 配置下载域名白名单")
-    row = ClientRelease(**body.model_dump(), created_at=time.time(), enabled=True)
+    # Keep the legacy database column populated for rolling deployments. System
+    # releases are download-page announcements, so clients do not consume it.
+    row = ClientRelease(**body.model_dump(), sha256="", created_at=time.time(), enabled=True)
     try:
         db.add(row)
         db.flush()
@@ -168,7 +168,7 @@ def client_info(
     arch: Literal["aarch64", "x86_64"],
     version: str,
     db=Depends(get_db),
-    content_protocol: int = Query(default=1, ge=1, le=2),
+    content_protocol: int = Query(default=1, ge=1, le=3),
 ):
     current = version_tuple(version)
     p = policy(db)

@@ -62,10 +62,13 @@ async def invalid(request, exc):
 @app.middleware("http")
 async def protect(request, call_next):
     if request.method in {"POST", "PATCH", "PUT"}:
+        # Feedback may contain three 5 MB images plus an explicitly approved task log.
+        # All other endpoints keep the narrow general request limit.
+        max_body = 86 * 1024 * 1024 if request.method == "POST" and request.url.path == "/api/core/v1/feedback" else 2 * 1024 * 1024
         body = bytearray()
         async for part in request.stream():
             body.extend(part)
-            if len(body) > 2 * 1024 * 1024:
+            if len(body) > max_body:
                 return await error(request, ApiError(413, "PAYLOAD_TOO_LARGE"))
         request._body = bytes(body)
     response = await call_next(request)
@@ -117,6 +120,7 @@ def config(session=Depends(require_admin)):
     return {
         "model_base_url": "/v1",
         "protocol": "chat_completions",
+        "protocols": ["chat_completions", "responses"],
         "encryption_configured": bool(settings().model_key_encryption_key),
     }
 
@@ -133,10 +137,11 @@ app.include_router(model_admin)
 app.include_router(model_public)
 app.include_router(accounts_admin)
 app.include_router(accounts_public)
-from .skill_sync import router as skill_router  # noqa: E402
+from .skill_sync import router as skill_router, admin as skill_admin  # noqa: E402
 from .feedback import user as feedback_user, admin as feedback_admin  # noqa: E402
 from .client_updates import public as client_public, admin as client_admin  # noqa: E402
 app.include_router(skill_router)
+app.include_router(skill_admin)
 app.include_router(feedback_user)
 app.include_router(feedback_admin)
 app.include_router(client_public)

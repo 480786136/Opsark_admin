@@ -5,6 +5,16 @@ import UsersPanel from "./UsersPanel.vue";
 import CallMonitor from "./CallMonitor.vue";
 import CloudPanel from "./CloudPanel.vue";
 import OfficialContentPanel from "./OfficialContentPanel.vue";
+import NativeModelParameters from "./NativeModelParameters.vue";
+import ParameterComparison from "./ParameterComparison.vue";
+import { loadModelManagement, readAdminResponse } from "./adminApi.js";
+import {
+  emptyParameters,
+  parametersFromApi,
+  parametersToApi,
+  selectPreset,
+  presetParameterError,
+} from "./modelPresetForms.js";
 const user = ref(null),
   csrf = ref(""),
   busy = ref(false),
@@ -16,6 +26,8 @@ const providers = ref([]),
   keys = ref([]),
   config = ref({});
 const freshKey = ref("");
+const presets = ref([]),
+  presetPreview = ref(null);
 const monitorScope = ref({}),
   selectedUserId = ref("");
 function showMonitor(scope = {}) {
@@ -30,35 +42,6 @@ const providerDrawer = ref(null),
   routeDrawer = ref(null);
 const editingProviderId = ref("");
 const login = reactive({ username: "admin", password: "" });
-const emptyParameters = () => ({
-  thinking_type: "",
-  reasoning_effort: "",
-  temperature: null,
-  top_p: null,
-  max_tokens: null,
-  presence_penalty: null,
-  frequency_penalty: null,
-});
-const parametersFromApi = (value = {}) => ({
-  ...emptyParameters(),
-  ...value,
-  thinking_type: value.thinking?.type || "",
-});
-const parametersToApi = (value) => {
-  const result = {};
-  if (value.thinking_type) result.thinking = { type: value.thinking_type };
-  if (value.reasoning_effort) result.reasoning_effort = value.reasoning_effort;
-  for (const name of [
-    "temperature",
-    "top_p",
-    "max_tokens",
-    "presence_penalty",
-    "frequency_penalty",
-  ]) {
-    if (value[name] !== null && value[name] !== "") result[name] = value[name];
-  }
-  return result;
-};
 const parameterSummary = (value = {}) => {
   const labels = {
     thinking: "思考",
@@ -66,6 +49,9 @@ const parameterSummary = (value = {}) => {
     temperature: "温度",
     top_p: "Top P",
     max_tokens: "最大 Token",
+    max_completion_tokens: "最大 Completion Token",
+    max_output_tokens: "最大生成预算（Responses）",
+    enable_thinking: "原生思考开关",
     presence_penalty: "话题惩罚",
     frequency_penalty: "重复惩罚",
   };
@@ -164,9 +150,59 @@ const route = reactive({
   alias: "",
   provider_id: "",
   upstream_model: "",
+  preset_id: "custom",
+  api_protocol: "chat_completions",
+  structured_output: "unknown",
+  budget_semantics: "unknown",
   enabled: true,
   parameters: emptyParameters(),
 });
+const selectedPreset = computed(() =>
+  presets.value.find((p) => p.id === route.preset_id),
+);
+const routeParameterError = computed(() => {
+  const values = parametersToApi(route.parameters);
+  if (route.api_protocol === "responses") {
+    if (selectedPreset.value && selectedPreset.value.id !== "openai-gpt41-v1") return "当前预设不支持 Responses，请切换协议或选择自定义模型。";
+    const incompatible = ["thinking", "enable_thinking", "max_tokens", "frequency_penalty", "presence_penalty"].filter((key) => values[key] !== undefined);
+    if (incompatible.length) return `Responses 不支持已有参数 ${incompatible.join("、")}，请清空或调整后保存。`;
+    if (values.max_completion_tokens !== undefined && route.budget_semantics !== "total_output" && selectedPreset.value?.id !== "openai-gpt41-v1") return "总生成预算含义未确认，不能将 max_completion_tokens 转为 Responses 预算。";
+  } else if (values.max_output_tokens !== undefined) return "Chat Completions 不支持 max_output_tokens，请清空或调整后保存。";
+  return presetParameterError(route.parameters, selectedPreset.value);
+});
+const selectedProvider = computed(() =>
+  providers.value.find((p) => p.id === route.provider_id),
+);
+let previewVersion = 0;
+watch(
+  [route, providers],
+  () => {
+    presetPreview.value = null;
+    previewVersion++;
+  },
+  { deep: true, flush: "sync" },
+);
+function useProviderTemplate(id) {
+  const preset = presets.value.find((p) => p.id === id);
+  if (!preset || provider.id) return;
+  provider.name = preset.label;
+  provider.base_url = preset.base_url;
+  provider.api_key = "";
+}
+async function previewRoute() {
+  presetPreview.value = null;
+  const version = ++previewVersion;
+  const result = await api("model-presets/preview", "POST", {
+    preset_id: route.preset_id,
+    upstream_model: route.upstream_model,
+    provider_id: route.provider_id,
+    api_protocol: route.api_protocol,
+    structured_output: route.structured_output,
+    budget_semantics: route.budget_semantics,
+    parameter_overrides: parametersToApi(route.parameters),
+  });
+  if (version === previewVersion) presetPreview.value = result;
+}
 const keyForm = reactive({
   owner: "",
   allowed_models: [],
@@ -211,12 +247,8 @@ async function api(path, method = "GET", body) {
     headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf.value },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  const result = await response.json();
-  if (!response.ok) {
-    if (response.status === 401 && path !== "session") user.value = null;
-    throw new Error(result.error?.message || result.error?.code || "请求失败");
-  }
-  return result;
+  if (response.status === 401 && path !== "session") user.value = null;
+  return readAdminResponse(response);
 }
 async function action(fn) {
   busy.value = true;
@@ -231,9 +263,8 @@ async function action(fn) {
   }
 }
 async function refresh() {
-  [config.value, providers.value, routes.value, keys.value] = await Promise.all(
-    ["config", "providers", "routes", "model-keys"].map((p) => api(p)),
-  );
+  const targets = { config, providers, routes, "model-keys": keys, "model-presets": presets };
+  await loadModelManagement(api, (path, value) => { targets[path].value = value; });
 }
 async function signIn() {
   const s = await api("session", "POST", login);
@@ -268,6 +299,10 @@ function resetRoute() {
     alias: "",
     provider_id: "",
     upstream_model: "",
+    preset_id: "custom",
+    api_protocol: "chat_completions",
+    structured_output: "unknown",
+    budget_semantics: "unknown",
     enabled: true,
     parameters: emptyParameters(),
   });
@@ -494,16 +529,19 @@ onMounted(() =>
           <p>
             core 模型 base URL：<code>{{ baseURL }}</code>
           </p>
-          <p v-if="!config.encryption_configured" class="error" role="alert">
+          <p v-if="config.encryption_configured === false" class="error" role="alert">
             尚未配置 MODEL_KEY_ENCRYPTION_KEY，暂不能保存上游 Key。请按 README
             完成初始化。
+          </p>
+          <p v-else-if="config.encryption_configured !== true" role="status">
+            后台配置尚未加载，暂时无法确认密钥存储状态。请在接口恢复后刷新页面。
           </p>
           <details>
             <summary>接口说明</summary>
             <p>
               支持 Core 登录用户的官方模型调用，以及独立的平台模型
-              Key；不接受上游 Key、知识 Key 或管理员密码。当前支持 Chat
-              Completions 兼容 API，其他协议暂不支持。
+              Key；不接受上游 Key、知识 Key 或管理员密码。按路由选择 Chat
+              Completions 或 Responses（文本、非流式）。
             </p>
             <p>支持 HTTP/HTTPS、内网 IP 和自定义端口，无需配置主机白名单。</p>
           </details>
@@ -566,6 +604,19 @@ onMounted(() =>
                 </button>
               </header>
               <form id="provider-editor" @submit.prevent="action(saveProvider)">
+                <label v-if="!provider.id" class="preset-full"
+                  >供应商地址模板
+                  <select @change="useProviderTemplate($event.target.value)">
+                    <option value="">自定义地址</option>
+                    <option v-for="p in presets" :key="p.id" :value="p.id">
+                      {{ p.label }}
+                    </option>
+                  </select>
+                  <small
+                    >仅填入名称与地址；切换模板会清空未保存的
+                    Key。千问默认北京地域，可手动修改。</small
+                  >
+                </label>
                 <label
                   >名称<input
                     v-model="provider.name"
@@ -618,6 +669,7 @@ onMounted(() =>
                   </div>
                   <fieldset class="advanced-parameters">
                     <legend>高级参数默认值</legend>
+                    <NativeModelParameters :parameters="provider.parameters" />
                     <label
                       ><span class="field-title"
                         >思考模式
@@ -701,7 +753,7 @@ onMounted(() =>
                       ><input
                         v-model.number="provider.parameters.top_p"
                         type="number"
-                        min="0.01"
+                        min="0"
                         max="1"
                         step="0.01"
                         placeholder="由调用请求决定"
@@ -786,6 +838,7 @@ onMounted(() =>
                   <span class="badge">编辑中</span>
                 </div>
                 <div class="detail-grid">
+                  <NativeModelParameters :parameters="provider.parameters" />
                   <label
                     >名称<input
                       v-model="provider.name"
@@ -964,6 +1017,85 @@ onMounted(() =>
                 </button>
               </header>
               <form id="route-editor" @submit.prevent="action(saveRoute)">
+                <p v-if="error" class="error preset-full" role="alert">
+                  {{ error }}
+                </p>
+                <label class="preset-full"
+                  >模型接入预设
+                  <select
+                    v-model="route.preset_id"
+                    @change="selectPreset(route, presets)"
+                  >
+                    <option value="custom">自定义模型（保留原参数）</option>
+                    <option v-for="p in presets" :key="p.id" :value="p.id">
+                      {{ p.label }}
+                    </option>
+                    <option
+                      v-if="route.preset_id !== 'custom' && !selectedPreset"
+                      :value="route.preset_id"
+                    >
+                      未知预设，请重新选择
+                    </option>
+                  </select>
+                </label>
+                <div
+                  v-if="selectedPreset"
+                  class="parameter-summary preset-panel"
+                >
+                  <p>{{ selectedPreset.notes }}</p>
+                  <p>
+                    接口：{{ route.api_protocol === "responses" ? "Responses" : "Chat Completions" }} · 输出格式：{{
+                      selectedPreset.formats.join(" / ")
+                    }}
+                  </p>
+                  <p>
+                    预设默认值：{{
+                      parameterSummary(selectedPreset.defaults)
+                    }}。原有强制参数保留。
+                  </p>
+                  <p>推荐地址：{{ selectedPreset.base_url }}</p>
+                  <p
+                    v-if="
+                      selectedProvider &&
+                      selectedProvider.base_url.replace(/\/$/, '') !==
+                        selectedPreset.base_url
+                    "
+                  >
+                    当前供应商地址与模板不同，请确认代理或地域配置。不会自动更换地址或发送密钥。
+                  </p>
+                  <a
+                    :href="selectedPreset.docs_url"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    >官方参数文档</a
+                  >
+                </div>
+                <p v-else class="preset-full">
+                  自定义模型需明确选择 API 协议及已确认的输出能力；保存不会调用上游进行探测。
+                </p>
+                <label>API 协议
+                  <select v-model="route.api_protocol">
+                    <option value="chat_completions">Chat Completions</option>
+                    <option value="responses" :disabled="!!selectedPreset && selectedPreset.id !== 'openai-gpt41-v1'">Responses（文本、非流式）</option>
+                  </select>
+                </label>
+                <label v-if="!selectedPreset">已确认的输出能力
+                  <select v-model="route.structured_output">
+                    <option value="unknown">未确认</option>
+                    <option value="json_object">JSON 输出</option>
+                    <option value="json_schema">JSON Schema 与 JSON 输出</option>
+                  </select>
+                </label>
+                <label v-if="!selectedPreset">生成预算计数
+                  <select v-model="route.budget_semantics">
+                    <option value="unknown">未确认</option>
+                    <option value="total_output">总生成（含推理）</option>
+                    <option value="visible_output">仅可见回答</option>
+                  </select>
+                </label>
+                <label v-if="route.api_protocol === 'responses'">最大生成预算（max_output_tokens）
+                  <input v-model.number="route.parameters.max_output_tokens" type="number" min="1" max="16384" placeholder="不强制" />
+                </label>
                 <label
                   >Core 配置名称<input
                     v-model="route.display_name"
@@ -977,14 +1109,31 @@ onMounted(() =>
                     required
                     maxlength="128" /></label
                 ><label
-                  >供应商<select v-model="route.provider_id" required>
+                  >供应商<select
+                    v-model="route.provider_id"
+                    aria-label="供应商"
+                    required
+                  >
                     <option value="">请选择</option>
                     <option v-for="p in providers" :key="p.id" :value="p.id">
                       {{ p.name }}
                     </option>
                   </select></label
                 ><label
-                  >上游真实模型名<input
+                  >上游真实模型名<select
+                    v-if="selectedPreset"
+                    v-model="route.upstream_model"
+                    required
+                  >
+                    <option
+                      v-for="model in selectedPreset.models"
+                      :key="model"
+                      :value="model"
+                    >
+                      {{ model }}
+                    </option></select
+                  ><input
+                    v-else
                     v-model="route.upstream_model"
                     required
                     maxlength="200"
@@ -997,7 +1146,10 @@ onMounted(() =>
                     }}</small>
                   </summary>
                   <div class="parameter-toolbar">
-                    <p>优先级最高。Knowledge 专用路由建议使用推荐值。</p>
+                    <p>
+                      优先级：预设默认值 &lt; 供应商默认值 &lt; 调用参数 &lt;
+                      路由强制参数。预设不强制覆盖调用预算。
+                    </p>
                     <button
                       type="button"
                       class="secondary"
@@ -1015,7 +1167,8 @@ onMounted(() =>
                   </div>
                   <fieldset class="advanced-parameters">
                     <legend>路由强制参数</legend>
-                    <label
+                    <NativeModelParameters v-if="route.api_protocol === 'chat_completions'" :parameters="route.parameters" :thinking-allowed="selectedPreset?.parameter_rules?.thinkingEnabled !== false" />
+                    <label v-if="route.api_protocol === 'chat_completions'"
                       ><span class="field-title"
                         >思考模式
                         <span
@@ -1028,7 +1181,7 @@ onMounted(() =>
                       ><select v-model="route.parameters.thinking_type">
                         <option value="">不强制</option>
                         <option value="disabled">关闭</option>
-                        <option value="enabled">开启</option>
+                        <option value="enabled" :disabled="selectedPreset?.parameter_rules?.thinkingEnabled === false">开启</option>
                       </select></label
                     >
                     <label
@@ -1044,13 +1197,10 @@ onMounted(() =>
                       ><select v-model="route.parameters.reasoning_effort">
                         <option value="">不强制</option>
                         <option value="none">none</option>
-                        <option value="low">low</option>
-                        <option value="medium">medium</option>
-                        <option value="high">high</option>
-                        <option value="max">max</option>
+                        <option v-for="effort in ['low','medium','high','max']" :key="effort" :value="effort" :disabled="!!selectedPreset?.parameter_rules && !selectedPreset.parameter_rules.reasoningEfforts.includes(effort) && !(effort === 'max' && selectedPreset.id === 'deepseek-chat-v1')">{{ effort }}</option>
                       </select></label
                     >
-                    <label
+                    <label v-if="route.api_protocol === 'chat_completions'"
                       ><span class="field-title"
                         >最大输出 Token
                         <span
@@ -1098,12 +1248,12 @@ onMounted(() =>
                       ><input
                         v-model.number="route.parameters.top_p"
                         type="number"
-                        min="0.01"
+                        min="0"
                         max="1"
                         step="0.01"
                         placeholder="不强制"
                     /></label>
-                    <label
+                    <label v-if="route.api_protocol === 'chat_completions'"
                       ><span class="field-title"
                         >Presence penalty
                         <span
@@ -1121,7 +1271,7 @@ onMounted(() =>
                         step="0.1"
                         placeholder="不强制"
                     /></label>
-                    <label
+                    <label v-if="route.api_protocol === 'chat_completions'"
                       ><span class="field-title"
                         >Frequency penalty
                         <span
@@ -1141,6 +1291,12 @@ onMounted(() =>
                     /></label>
                   </fieldset>
                 </details>
+                <p v-if="routeParameterError" class="error preset-full" role="alert">{{ routeParameterError }}</p>
+                <div v-if="presetPreview" class="parameter-summary preset-panel" aria-live="polite">
+                  <p>{{ presetPreview.note }}</p>
+                  <ParameterComparison :requested="parametersToApi(route.parameters)" :effective="presetPreview.parameters" requested-label="路由填写值" effective-label="预览生效值"/>
+                  <p v-for="change in presetPreview.changes" :key="change">{{ change }}</p>
+                </div>
                 <div class="form-actions">
                   <label
                     ><input
@@ -1148,7 +1304,17 @@ onMounted(() =>
                       type="checkbox"
                     />启用</label
                   >
-                  <button :disabled="busy">保存路由</button>
+                  <button
+                    type="button"
+                    class="secondary"
+                    :disabled="
+                      busy || !!routeParameterError || !route.provider_id || !route.upstream_model
+                    "
+                    @click="action(previewRoute)"
+                  >
+                    预览参数（不调用模型）
+                  </button>
+                  <button :disabled="busy || !!routeParameterError">保存路由</button>
                   <button
                     type="button"
                     class="secondary"
@@ -1173,6 +1339,12 @@ onMounted(() =>
               <p>
                 {{ providers.find((p) => p.id === r.provider_id)?.name }} /
                 {{ r.upstream_model }}
+              </p>
+              <p>
+                预设：{{
+                  presets.find((p) => p.id === r.preset_id)?.label ||
+                  (r.preset_id === "custom" ? "自定义模型" : r.preset_id)
+                }}
               </p>
               <p
                 v-if="Object.keys(r.parameter_overrides || {}).length"
@@ -1313,3 +1485,18 @@ onMounted(() =>
     </section>
   </div>
 </template>
+
+<style scoped>
+.drawer-sheet form > .preset-full,
+.drawer-sheet form > .preset-panel {
+  grid-column: 1 / -1;
+}
+.preset-panel {
+  display: block;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.preset-panel pre {
+  white-space: pre-wrap;
+}
+</style>

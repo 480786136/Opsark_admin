@@ -79,6 +79,41 @@ def test_json_routing_keys_and_usage(setup):
         assert db.get(ModelKey, issued["id"]).token_hash != issued["api_key"]
 
 
+@pytest.mark.parametrize("status,message,format_type,expected", [
+    (400, "json_schema is not supported: synthetic-upstream-private", "json_schema", "UPSTREAM_SCHEMA_UNSUPPORTED"),
+    (422, "unsupported response_format", "json_schema", "UPSTREAM_SCHEMA_UNSUPPORTED"),
+    (400, "This response_format type is unavailable now", "json_schema", "UPSTREAM_SCHEMA_UNSUPPORTED"),
+    (422, "This response_format type is unavailable now", "json_schema", "UPSTREAM_SCHEMA_UNSUPPORTED"),
+    (400, "This response_format type is unavailable now", "json_object", "UPSTREAM_HTTP_ERROR"),
+    (429, "This response_format type is unavailable now", "json_schema", "UPSTREAM_HTTP_ERROR"),
+    (400, "Service unavailable now; request has response_format", "json_schema", "UPSTREAM_HTTP_ERROR"),
+    (400, "invalid schema definition", "json_schema", "UPSTREAM_SCHEMA_INVALID"),
+    (400, "json_schema not supported", "json_object", "UPSTREAM_HTTP_ERROR"),
+    (401, "json_schema not supported", "json_schema", "UPSTREAM_HTTP_ERROR"),
+    (429, "json_schema not supported", "json_schema", "UPSTREAM_HTTP_ERROR"),
+])
+def test_schema_capability_error_is_specific_and_redacted(setup, status, message, format_type, expected):
+    c, _, _, _, issued = setup
+    captured = []
+
+    def handler(r):
+        captured.append(json.loads(r.content))
+        return httpx.Response(status, json={"error": {"message": message}})
+
+    mock(handler)
+    response_format = {"type": format_type}
+    if format_type == "json_schema":
+        response_format["json_schema"] = {
+            "name": "test", "strict": True,
+            "schema": {"type": "object", "properties": {}, "additionalProperties": False},
+        }
+    response = request(c, issued, response_format=response_format)
+    assert response.json()["error"]["code"] == expected
+    assert captured[0]["response_format"] == response_format
+    assert "synthetic-upstream-private" not in response.text
+    assert response.status_code == (502 if status == 401 else status)
+
+
 def test_client_deadline_caps_gateway_upstream_timeout(setup):
     c, _admin, _pid, _rid, issued = setup
     captured = []
@@ -376,7 +411,7 @@ def test_validated_parameter_defaults_and_route_overrides(setup):
     [
         {"thinking": {"type": "sometimes"}},
         {"temperature": 3},
-        {"top_p": 0},
+        {"top_p": -0.01},
         {"max_tokens": 0},
         {"unknown_vendor_option": True},
         {"thinking": {"type": "disabled"}, "reasoning_effort": "high"},
@@ -405,3 +440,25 @@ def test_invalid_caller_model_parameters_are_not_forwarded(setup):
     assert result.status_code == 422
     assert result.json()["error"]["code"] == "INVALID_MODEL_PARAMETERS"
     assert called == []
+
+
+def test_official_chat_default_budget_matches_catalog_limit(setup):
+    client, staff, provider_id, route_id, issued = setup
+    response = client.put(f"/api/admin/v1/routes/{route_id}", headers=staff, json={
+        "alias": "public-model", "provider_id": provider_id, "upstream_model": "private-model",
+        "structured_output": "json_object",
+    })
+    assert response.status_code == 200, response.text
+    headers = {"Authorization": "Bearer " + issued["api_key"]}
+    caps = client.get("/v1/models", headers=headers).json()["data"][0]["capabilitiesV2"]
+    captured = []
+    mock(lambda req: (captured.append(req), httpx.Response(200, json={
+        "choices": [{"message": {"role": "assistant", "content": "{}"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+    }))[1])
+    result = client.post("/v1/chat/completions", headers={
+        **headers, "X-Opsark-Expected-Capability-Revision": caps["revision"],
+    }, json={"model": "public-model", "messages": [{"role": "user", "content": "Return JSON"}]})
+    assert result.status_code == 200, result.text
+    assert caps["defaultOutputTokens"] == caps["maxOutputTokens"]
+    assert json.loads(captured[0].content)[caps["tokenField"]] == caps["maxOutputTokens"]

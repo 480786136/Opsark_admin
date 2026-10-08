@@ -1,3 +1,4 @@
+import base64
 import json
 import time
 import uuid
@@ -81,7 +82,9 @@ def test_skill_owner_scope_encryption_and_idempotency(cloud):
     assert put_skill(c, a, mutation=mutation, content={**SKILL, "name": "Changed"}).status_code == 409
     assert c.get(PREFIX + "/skills", headers=b).json()["items"] == []
     assert put_skill(c, b, content={**SKILL, "name": "Other owner"}).status_code == 200
-    assert c.get(PREFIX + "/skills", headers=a).json()["items"][0]["content"] == SKILL
+    assert c.get(PREFIX + "/skills", headers=a).json()["items"][0]["content"] == {
+        key: value for key, value in SKILL.items() if key not in {"allowShell", "allowedToolIds"}
+    }
     for db in app.dependency_overrides[get_db]():
         row = db.get(UserSkill, (first["user"]["id"], "skill-test"))
         assert SKILL["instructions"] not in row.encrypted_payload
@@ -90,12 +93,15 @@ def test_skill_owner_scope_encryption_and_idempotency(cloud):
 
 
 def test_skill_conflicts_tombstones_and_explicit_restore(cloud):
-    c, _, _, a, _ = cloud
+    c, staff, first, a, _ = cloud
     assert put_skill(c, a).status_code == 200
     assert put_skill(c, a, content={**SKILL, "name": "stale"}).status_code == 409
     assert put_skill(c, a, revision=1, content=None).json()["revision"] == 2
     deleted = c.get(PREFIX + "/skills", headers=a).json()["items"][0]
     assert deleted["deleted"] and deleted["content"] is None
+    admin_rows = c.get(f"/api/admin/v1/users/{first['user']['id']}/skills", headers=staff).json()
+    assert admin_rows[0]["id"] == "skill-test"
+    assert admin_rows[0]["deleted"] is True and admin_rows[0]["content"] is None
     assert put_skill(c, a, revision=1).status_code == 409
     assert put_skill(c, a, revision=2).json()["revision"] == 3
     assert put_skill(c, a, ident="skill-missing", content=None).status_code == 404
@@ -208,7 +214,6 @@ def test_release_guidance_platform_semver_whitelist_withdrawal_and_cloud_gate(cl
         "version": "0.3.10",
         "notes": "Update notes",
         "download_url": "https://downloads.example.test/core.dmg",
-        "sha256": "a" * 64,
     }
     assert (
         c.post(
@@ -218,6 +223,7 @@ def test_release_guidance_platform_semver_whitelist_withdrawal_and_cloud_gate(cl
     )
     r = c.post("/api/admin/v1/client-releases", headers=staff, json=release)
     assert r.status_code == 201, r.text
+    assert "sha256" not in r.json()
     assert c.post("/api/admin/v1/client-releases", headers=staff, json=release).status_code == 409
     info = c.get(PREFIX + "/client-info", params={"platform": "macos", "arch": "aarch64", "version": "0.3.9"}).json()
     assert info["latest"]["version"] == "0.3.10" and not info["update_required"]
@@ -278,7 +284,15 @@ def test_anonymous_feedback_images_full_logs_idempotency_and_private_access(clou
         assert PNG_IMAGE["data"] not in row.encrypted_payload
         row.expires_at = time.time() - 1
         db.commit()
-    assert c.get("/api/admin/v1/feedback/" + ident).json()["content"] is None
+        assert c.get("/api/admin/v1/feedback/" + ident).json()["content"] is None
+
+
+def test_feedback_image_request_can_exceed_the_general_two_megabyte_limit(cloud):
+    c, *_ = cloud
+    raw = b"\x89PNG\r\n\x1a\n" + b"\0" * (2 * 1024 * 1024)
+    image = {"name": "large-screenshot.png", "mime_type": "image/png", "data": base64.b64encode(raw).decode()}
+    response = c.post(PREFIX + "/feedback", json=feedback_body(images=[image]))
+    assert response.status_code == 201, response.text
 
 
 @pytest.mark.parametrize("extra", [

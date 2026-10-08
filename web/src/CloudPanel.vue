@@ -40,7 +40,6 @@ const release = ref({
   version: "",
   notes: "",
   download_url: "",
-  sha256: "",
 });
 const busy = ref(false),
   error = ref(""),
@@ -316,8 +315,7 @@ onMounted(() => run(refresh));
       <form @submit.prevent="run(publish)">
         <h2>发布系统版本</h2>
         <p>
-          下载域名必须位于服务端
-          RELEASE_ALLOWED_HOSTS。安装包由发布流水线生成并签名；此页面不生成签名、不上传安装包、不自动重启客户端。
+          发布后，匹配平台与架构的 Core 用户会看到更新提醒。用户点击下载后，将在系统浏览器打开官网地址。
         </p>
         <fieldset :disabled="busy">
           <label
@@ -343,11 +341,6 @@ onMounted(() => run(refresh));
               type="url"
               maxlength="2000"
               required /></label
-          ><label
-            >安装包 SHA-256<input
-              v-model="release.sha256"
-              pattern="[a-fA-F0-9]{64}"
-              required /></label
           ><label class="wide"
             >更新说明<textarea
               v-model="release.notes"
@@ -355,7 +348,7 @@ onMounted(() => run(refresh));
               maxlength="8000"
               required
             /></label
-          ><button>发布版本引导</button>
+          ><button>发布更新</button>
         </fieldset>
       </form></DetailDialog
     >
@@ -375,10 +368,6 @@ onMounted(() => run(refresh));
         <div>
           <dt>官网下载地址</dt>
           <dd>{{ releaseDetail.download_url }}</dd>
-        </div>
-        <div>
-          <dt>SHA-256</dt>
-          <dd>{{ releaseDetail.sha256 }}</dd>
         </div>
       </dl>
       <pre class="payload-view">{{ releaseDetail?.notes }}</pre>

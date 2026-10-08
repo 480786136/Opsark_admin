@@ -39,6 +39,11 @@ class ModelRoute(Base):
     upstream_model: Mapped[str] = mapped_column(String(200))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     parameter_overrides: Mapped[dict] = mapped_column(JSON, default=dict)
+    preset_id: Mapped[str] = mapped_column(String(64), default="custom", server_default="custom")
+    api_protocol: Mapped[str] = mapped_column(String(32), default="chat_completions", server_default="chat_completions")
+    structured_output: Mapped[str] = mapped_column(String(32), default="unknown", server_default="unknown")
+    capabilities_v2_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="false")
+    budget_semantics: Mapped[str] = mapped_column(String(32), default="unknown", server_default="unknown")
 
 
 class ModelKey(Base):
@@ -73,6 +78,11 @@ class ModelCall(Base):
     http_status: Mapped[int | None] = mapped_column(Integer)
     input_tokens: Mapped[int | None] = mapped_column(Integer)
     output_tokens: Mapped[int | None] = mapped_column(Integer)
+    cached_tokens: Mapped[int | None] = mapped_column(Integer)
+    reasoning_tokens: Mapped[int | None] = mapped_column(Integer)
+    usage_raw: Mapped[dict | None] = mapped_column(JSON)
+    api_protocol: Mapped[str] = mapped_column(String(32), default="chat_completions", server_default="chat_completions")
+    raw_status: Mapped[str | None] = mapped_column(String(40))
     error_code: Mapped[str | None] = mapped_column(String(64))
 
 

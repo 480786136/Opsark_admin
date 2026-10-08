@@ -1,5 +1,12 @@
 <script setup>
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import {
+  computed,
+  nextTick,
+  onMounted,
+  ref,
+  watch,
+} from "vue";
+import DetailDialog from "./DetailDialog.vue";
 const props = defineProps({
   api: { type: Function, required: true },
   initialUserId: { type: String, default: "" },
@@ -11,7 +18,8 @@ const users = ref([]),
   routes = ref([]),
   providers = ref([]),
   pending = ref([]),
-  entries = ref([]);
+  entries = ref([]),
+  userSkills = ref([]);
 const policy = ref({
   enabled: false,
   initial_tokens: 0,
@@ -24,6 +32,7 @@ const hasLegacyLedger = computed(() => entries.value.some(item => item.reserved_
 const selected = ref(null),
   delta = ref(0),
   reason = ref("");
+const selectedSkill = ref(null);
 const detailElement = ref(null);
 const error = ref(""),
   notice = ref(""),
@@ -44,6 +53,12 @@ const sessionStatus = ref("all"),
 const securityDialog = ref(null),
   securityAction = ref(null),
   securityReason = ref("");
+const callStatusLabels = {
+  running: "进行中",
+  succeeded: "已成功",
+  failed: "已失败",
+  cancelled: "已取消",
+};
 const pages = computed(() =>
   Math.max(1, Math.ceil(total.value / pageSize.value)),
 );
@@ -91,6 +106,13 @@ function routeStatus(route) {
 function date(value) {
   return new Date(value * 1000).toLocaleString();
 }
+function skillUpdatedAt(item) {
+  const value = item?.content?.updatedAt;
+  return value ? new Date(value).toLocaleString() : date(item.updated_at);
+}
+function closeSkillDetail(open) {
+  if (!open) selectedSkill.value = null;
+}
 let adjustmentKey = "";
 async function run(fn) {
   if (busy.value) return;
@@ -114,8 +136,35 @@ async function loadPolicy() {
   );
   savedAllowedModels.value = [...policy.value.allowed_models];
 }
+let pendingRequestGeneration = 0;
+function pendingItems(result) {
+  const items = Array.isArray(result)
+    ? result
+    : (result?.pending ?? result?.items);
+  if (!Array.isArray(items)) throw new Error("用量异常列表响应格式不正确");
+  return items;
+}
 async function loadPending() {
-  pending.value = await props.api("credit-reservations");
+  const generation = ++pendingRequestGeneration;
+  const result = await props.api("credit-reservations");
+  if (generation === pendingRequestGeneration)
+    pending.value = pendingItems(result);
+}
+function reservationState(item) {
+  return item.effective_state || item.state;
+}
+function callStatusLabel(item) {
+  if (
+    item.call_status === "running" &&
+    reservationState(item) === "needs_reconciliation"
+  )
+    return "结果未确认";
+  return callStatusLabels[item.call_status] || item.call_status;
+}
+async function openReservationUser(item) {
+  await run(async () => {
+    await open(await props.api(`users/${encodeURIComponent(item.user_id)}`));
+  });
 }
 async function loadUsers() {
   const params = new URLSearchParams({
@@ -170,6 +219,9 @@ async function refreshSelected() {
     props.api(`users/${selected.value.id}/ledger`).then((data) => {
       entries.value = data;
     }),
+    props.api(`users/${selected.value.id}/skills`).then((data) => {
+      userSkills.value = data;
+    }),
   ]);
 }
 async function open(user) {
@@ -179,6 +231,7 @@ async function open(user) {
   reason.value = "";
   adjustmentKey = "";
   entries.value = [];
+  userSkills.value = [];
   sessions.value = [];
   sessionPage.value = 1;
   sessionStatus.value = "all";
@@ -300,7 +353,7 @@ watch(
         :aria-pressed="section === 'pending'"
         @click="section = 'pending'"
       >
-        待核对调用
+        用量异常记录
       </button>
     </div>
     <div v-else class="detail-breadcrumb">
@@ -590,6 +643,13 @@ watch(
         </button>
         <button
           class="secondary"
+          :aria-pressed="detailTab === 'skills'"
+          @click="detailTab = 'skills'"
+        >
+          用户 Skill
+        </button>
+        <button
+          class="secondary"
           @click="emit('monitor', { user_id: selected.id })"
         >
           查看任务与调用
@@ -651,7 +711,7 @@ watch(
         </div>
         <p class="muted">显示最近 200 条流水。</p>
       </form>
-      <section v-else aria-label="用户会话">
+      <section v-else-if="detailTab === 'sessions'" aria-label="用户会话">
         <p>
           “可刷新”表示访问令牌已过期，但仍能刷新登录。撤销后访问令牌和刷新令牌均不可再用；已通过鉴权的在途请求可能继续完成。这里仅管理用户会话，不影响管理员登录。
         </p>
@@ -748,7 +808,46 @@ watch(
           </button>
         </nav>
       </section>
+      <section v-else aria-label="用户 Skill">
+        <p>展示该用户的云端个人 Skill。已删除记录保留用于多设备同步，不会作为可用 Skill 下发。</p>
+        <div class="user-table">
+          <table v-if="userSkills.length">
+            <thead><tr><th>Skill</th><th>分类</th><th>版本</th><th>启用</th><th>状态与更新时间</th><th>操作</th></tr></thead>
+            <tbody>
+              <tr v-for="item in userSkills" :key="item.id">
+                <td><strong>{{ item.content?.name || '已删除 Skill' }}</strong><small v-if="item.content?.description" class="skill-description">{{ item.content.description }}</small><small class="user-id">{{ item.id }}</small></td>
+                <td>{{ item.content?.category || '—' }}</td>
+                <td>内容 v{{ item.content?.version || '—' }}<small class="user-id">云端修订 {{ item.revision }}</small></td>
+                <td>{{ item.deleted ? '—' : item.content?.enabled ? '启用' : '停用' }}</td>
+                <td><span class="status-badge" :class="{ blocked: item.deleted }">{{ item.deleted ? '已删除（保留记录）' : '云端有效' }}</span><small class="user-id">{{ skillUpdatedAt(item) }}</small></td>
+                <td><button class="secondary" @click="selectedSkill = item">查看详情</button></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p v-if="!busy && !userSkills.length" class="empty-message">该用户暂无云端 Skill 记录。</p>
+      </section>
     </section>
+    <DetailDialog :open="!!selectedSkill" title="用户 Skill 详情" wide @update:open="closeSkillDetail">
+      <template v-if="selectedSkill">
+        <dl class="metadata-grid">
+          <div><dt>名称</dt><dd>{{ selectedSkill.content?.name || '已删除 Skill' }}</dd></div>
+          <div><dt>Skill ID</dt><dd><code>{{ selectedSkill.id }}</code></dd></div>
+          <div><dt>分类</dt><dd>{{ selectedSkill.content?.category || '—' }}</dd></div>
+          <div><dt>状态</dt><dd>{{ selectedSkill.deleted ? '已删除（墓碑保留）' : selectedSkill.content?.enabled ? '有效 · 已启用' : '有效 · 已停用' }}</dd></div>
+          <div><dt>内容版本</dt><dd>{{ selectedSkill.content?.version || '—' }}</dd></div>
+          <div><dt>云端修订</dt><dd>{{ selectedSkill.revision }}</dd></div>
+          <div><dt>内容修改时间</dt><dd>{{ skillUpdatedAt(selectedSkill) }}</dd></div>
+          <div><dt>云端记录时间</dt><dd>{{ date(selectedSkill.updated_at) }}</dd></div>
+        </dl>
+        <template v-if="selectedSkill.content">
+          <section class="skill-detail-section"><h3>适用场景</h3><p>{{ selectedSkill.content.description }}</p></section>
+          <section class="skill-detail-section"><h3>选择提示</h3><div class="skill-rule-list"><code v-for="rule in selectedSkill.content.matchRules || []" :key="rule">{{ rule }}</code><span v-if="!selectedSkill.content.matchRules?.length" class="muted">未设置</span></div></section>
+          <section class="skill-detail-section"><h3>执行说明</h3><pre class="payload-view">{{ selectedSkill.content.instructions }}</pre></section>
+        </template>
+        <p v-else class="empty-message">该记录已软删除，正文已清除，仅保留 ID、修订版本和删除时间用于同步审计。</p>
+      </template>
+    </DetailDialog>
     <dialog
       ref="securityDialog"
       class="security-dialog"
@@ -796,23 +895,80 @@ watch(
     </dialog>
     <section v-if="section === 'pending' && !selected">
       <div class="panel-toolbar">
-        <h2>调用中与待核对用量</h2>
+        <h2>用量异常记录</h2>
         <button class="secondary" :disabled="busy" @click="run(loadPending)">
-          刷新待核对
+          刷新异常记录
         </button>
       </div>
       <p>
-        新调用不预留额度。缺少用量或余额不足结算时保留待核对记录，可凭调用 ID
-        核对供应商用量；余额不足时补充后再结算。历史预留仍按原规则处理。
+        这里只记录供应商用量缺失、调用结果未知或余额不足等异常，供排障审计。异常记录不会阻断用户后续调用，也不会自动补扣余额；正常在途调用不在此展示。
       </p>
-      <div v-for="item in pending" :key="item.id" class="reservation">
-        <button class="text-link" @click="emit('monitor', { q: item.id })">
-          {{ item.id }}
-        </button>
-        · {{ item.state }} · 实际用量 {{ item.actual ?? '待确认' }} Token
-        <span v-if="item.amount"> · 历史预留 {{ item.amount }} Token</span>
+      <div v-if="pending.length" class="user-table">
+        <table>
+          <thead>
+            <tr>
+              <th>调用 ID</th>
+              <th>异常原因</th>
+              <th>已知用量</th>
+              <th>请求状态</th>
+              <th>用户</th>
+              <th>发生时间</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="item in pending" :key="item.id">
+              <td>
+                <button class="text-link" @click="emit('monitor', { q: item.id })">
+                  {{ item.id }}
+                </button>
+              </td>
+              <td>
+                {{ item.anomaly_reason || '用量结果未确认' }}
+                <small v-if="item.anomaly_code" class="user-id">{{
+                  item.anomaly_code
+                }}</small>
+              </td>
+              <td>
+                {{ item.actual ?? '未知' }}
+                <small
+                  v-if="item.input_tokens != null || item.output_tokens != null"
+                  class="user-id"
+                >
+                  输入 {{ item.input_tokens ?? '未知' }} · 输出
+                  {{ item.output_tokens ?? '未知' }}</small
+                >
+                <small v-if="item.amount" class="user-id">
+                  历史预留 {{ item.amount }}</small
+                >
+              </td>
+              <td>
+                {{ callStatusLabel(item) || '未知' }}
+                <small
+                  v-if="item.http_status != null || item.model"
+                  class="user-id"
+                >
+                  <span v-if="item.http_status != null"
+                    >HTTP {{ item.http_status }}</span
+                  >
+                  <span v-if="item.http_status != null && item.model"> · </span>
+                  <span v-if="item.model">{{ item.model }}</span>
+                </small>
+              </td>
+              <td>
+                <button
+                  class="text-link"
+                  :disabled="busy"
+                  @click="openReservationUser(item)"
+                >
+                  {{ item.email || item.user_id }}
+                </button>
+              </td>
+              <td>{{ date(item.created_at) }}</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
-      <p v-if="!pending.length">没有待核对调用</p>
+      <p v-else class="empty-message">没有用量异常记录</p>
     </section>
   </section>
 </template>
@@ -867,6 +1023,7 @@ watch(
 .user-id {
   color: #66758a;
 }
+.skill-description{display:block;max-width:360px;margin:5px 0;color:#596b60;font-size:12px;line-height:1.45;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.skill-detail-section{margin-top:22px}.skill-detail-section h3{margin:0 0 9px;font-size:14px}.skill-detail-section p{margin:0;color:#405249;line-height:1.7;white-space:pre-wrap}.skill-rule-list{display:flex;flex-wrap:wrap;gap:7px}.skill-rule-list code{padding:5px 8px;border-radius:5px;background:#f1f5f2;color:#315447;font-size:12px}
 .user-table {
   overflow: auto;
   width: 100%;

@@ -15,9 +15,11 @@ from .accounts import Strict, require_user
 from .cloud_common import check_cloud_version, reject_credentials, seal, unseal
 from .cloud_models import CloudMutation, UserSkill
 from .db import get_db
-from .security import ApiError, digest, limiter
+from .security import ApiError, digest, limiter, require_admin
+from .user_models import UserAccount
 
 router = APIRouter(prefix="/api/core/v1/skills")
+admin = APIRouter(prefix="/api/admin/v1", dependencies=[Depends(require_admin)])
 
 
 class UserSkillContent(Strict):
@@ -28,10 +30,12 @@ class UserSkillContent(Strict):
     description: str = Field(min_length=1, max_length=1000)
     instructions: str = Field(min_length=1, max_length=8000)
     matchRules: list[str] = Field(default_factory=list, max_length=50)
-    allowedToolIds: list[str] = Field(default_factory=list, max_length=100)
-    allowShell: bool = True
+    allowedToolIds: list[str] = Field(default_factory=list, max_length=100, exclude=True)
+    forbiddenToolIds: list[str] = Field(default_factory=list, max_length=100, exclude=True)
+    allowShell: bool = Field(default=True, strict=True, exclude=True)
     enabled: bool = True
     version: int = Field(default=1, strict=True, ge=1, le=10**6)
+    updatedAt: str | None = Field(default=None, max_length=40)
 
     @field_validator("name", "description", "instructions")
     @classmethod
@@ -40,7 +44,7 @@ class UserSkillContent(Strict):
             raise ValueError("empty content")
         return value.strip()
 
-    @field_validator("matchRules", "allowedToolIds")
+    @field_validator("matchRules", "allowedToolIds", "forbiddenToolIds")
     @classmethod
     def bounded_strings(cls, values):
         if any(len(value) > 256 for value in values):
@@ -62,6 +66,16 @@ def representation(row):
         "updated_at": row.updated_at,
         "content": unseal(row.encrypted_payload),
     }
+
+
+@admin.get("/users/{user_id}/skills")
+def admin_user_skills(user_id: str, db=Depends(get_db)):
+    if db.get(UserAccount, user_id) is None:
+        raise ApiError(404, "USER_NOT_FOUND", "用户不存在")
+    rows = db.scalars(
+        select(UserSkill).where(UserSkill.user_id == user_id).order_by(UserSkill.updated_at.desc(), UserSkill.id)
+    )
+    return [representation(row) for row in rows]
 
 
 @router.get("")
@@ -86,7 +100,7 @@ def mutate(skill_id: str, body: SkillMutation, request: Request, session=Depends
     limiter.check("skill-write:" + session.user_id, 60)
     if not re.fullmatch(r"skill-[a-zA-Z0-9-]{1,110}", skill_id):
         raise ApiError(422, "INVALID_USER_SKILL_ID", "系统 Skill 不能通过用户同步接口写入")
-    payload = body.content.model_dump() if body.content else None
+    payload = body.content.model_dump(exclude_none=True) if body.content else None
     reject_credentials(payload)
     request_hash = digest(
         json.dumps({"skill": skill_id, "revision": body.base_revision, "content": payload}, sort_keys=True)

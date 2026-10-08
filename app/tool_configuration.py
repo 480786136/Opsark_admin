@@ -1,7 +1,9 @@
 """Editable parameter contracts constrained by the shipped executor's capabilities."""
 
 import math
-import re
+
+from jsonschema import Draft7Validator
+from jsonschema.exceptions import SchemaError, ValidationError
 
 from .security import ApiError
 
@@ -24,39 +26,11 @@ def invalid(path, message):
 
 
 def validate_value(schema, value, path):
-    kind = schema["type"]
-    valid = {
-        "object": isinstance(value, dict),
-        "array": isinstance(value, list),
-        "string": isinstance(value, str),
-        "boolean": type(value) is bool,
-        "integer": type(value) is int,
-        "number": type(value) in (int, float) and math.isfinite(value),
-    }[kind]
-    if not valid:
-        invalid(path, "默认值类型不正确")
-    if "enum" in schema and value not in schema["enum"]:
-        invalid(path, "默认值不在枚举范围内")
-    if kind in ("number", "integer") and (
-        value < schema.get("minimum", -math.inf) or value > schema.get("maximum", math.inf)
-    ):
-        invalid(path, "默认值超出取值范围")
-    if kind == "string":
-        if not schema.get("minLength", 0) <= len(value) <= schema.get("maxLength", math.inf):
-            invalid(path, "默认值长度不符合限制")
-        if "pattern" in schema and not re.search(schema["pattern"], value):
-            invalid(path, "默认值不符合内置格式")
-    if kind == "array":
-        if not schema.get("minItems", 0) <= len(value) <= schema.get("maxItems", math.inf):
-            invalid(path, "默认值数量不符合限制")
-        for item in value:
-            validate_value(schema["items"], item, path + "[]")
-    if kind == "object":
-        props = schema.get("properties", {})
-        if not set(value).issubset(props) or not set(schema.get("required", [])).issubset(value):
-            invalid(path, "默认对象包含未知字段或缺少必填项")
-        for key, item in value.items():
-            validate_value(props[key], item, f"{path}.{key}")
+    try:
+        Draft7Validator(schema).validate(value)
+    except ValidationError as error:
+        location = ".".join(str(part) for part in error.absolute_path)
+        invalid(f"{path}.{location}" if location else path, "默认值不符合参数协议")
 
 
 def validate_schema(schema, baseline, path="参数协议", depth=0):
@@ -65,6 +39,11 @@ def validate_schema(schema, baseline, path="参数协议", depth=0):
     for key in (set(schema) | set(baseline)) - EDITABLE - {"properties", "items"}:
         if key not in schema or key not in baseline or schema[key] != baseline[key]:
             invalid(path, f"不能修改执行协议字段 {key}")
+    if depth == 0:
+        try:
+            Draft7Validator.check_schema(schema)
+        except SchemaError:
+            invalid(path, "参数 schema 不符合 Draft-07 协议")
     kind = baseline["type"]
     if "description" in schema and (not isinstance(schema["description"], str) or len(schema["description"]) > 2000):
         invalid(path, "参数说明最多 2000 字符")

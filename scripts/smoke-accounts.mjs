@@ -117,6 +117,55 @@ try {
   const models = await (await page.request.get(base + "/v1/models", { headers: userHeaders })).json();
   assert.deepEqual(models.data.map(m => m.id), ["trial-model"]);
   assert.equal(models.data[0].name, "官方体验模型");
+  // Exercise the read-only anomaly audit without calling a provider or
+  // exposing settlement controls that could affect the user.
+  const anomalyCallId = "smoke-usage-anomaly-call";
+  const anomalyStartedAt = Date.now() / 1000 - 1300;
+  const anomalyItem = {
+    id: anomalyCallId,
+    user_id: account.user.id,
+    idempotency_key: "smoke-anomaly-request",
+    request_hash: "a".repeat(64),
+    amount: 0,
+    actual: null,
+    state: "needs_reconciliation",
+    effective_state: "needs_reconciliation",
+    reconcile_allowed: true,
+    reconcile_after: null,
+    call_status: "failed",
+    call_error_code: "CALL_OUTCOME_UNKNOWN",
+    anomaly_code: "CALL_OUTCOME_UNKNOWN",
+    anomaly_reason: "调用失败或结果不确定，无法确认供应商用量",
+    input_tokens: null,
+    output_tokens: null,
+    created_at: anomalyStartedAt,
+    email: "first@example.test",
+  };
+  await page.route("**/api/admin/v1/credit-reservations**", async intercepted => {
+    const request = intercepted.request();
+    const pathname = new URL(request.url()).pathname;
+    if (request.method() === "GET" && pathname === "/api/admin/v1/credit-reservations") {
+      await intercepted.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([anomalyItem]) });
+      return;
+    }
+    await intercepted.fallback();
+  });
+  // Remount UsersPanel so its initial read observes the anomaly fixture.
+  await page.getByRole("button", { name: "供应商 API", exact: true }).click();
+  await page.getByRole("heading", { name: "供应商 API", exact: true }).waitFor();
+  await page.getByRole("button", { name: "用户与额度", exact: true }).click();
+  await page.getByRole("button", { name: "用量异常记录", exact: true }).click();
+  const anomalyRow = page.getByRole("row").filter({ hasText: anomalyCallId });
+  await expect(anomalyRow).toContainText("调用失败或结果不确定");
+  await expect(anomalyRow).toContainText("CALL_OUTCOME_UNKNOWN");
+  await expect(anomalyRow).toContainText("已失败");
+  await expect(anomalyRow).toContainText("未知");
+  await expect(page.getByRole("button", { name: "核对结算", exact: true })).toHaveCount(0);
+  const refreshAnomalies = page.waitForResponse(response =>
+    response.url().endsWith("/credit-reservations") && response.request().method() === "GET");
+  await page.getByRole("button", { name: "刷新异常记录", exact: true }).click();
+  assert.equal((await refreshAnomalies).status(), 200);
+  await expect(anomalyRow).toBeVisible();
   assert.equal(await page.locator(".empty-state").count(), 0);
   assert.equal(await page.locator(".list-pagination").count(), 0);
   const feedback = await page.request.post(base + "/api/core/v1/feedback", { headers: userHeaders, data: {
@@ -140,10 +189,9 @@ try {
   await page.getByRole("button", { name: "发布系统版本", exact: true }).click();
   await page.getByLabel("版本", { exact: true }).fill("0.3.1");
   await page.getByLabel("官网下载地址（HTTPS）", { exact: true }).fill("https://downloads.example.test/core.dmg");
-  await page.getByLabel("安装包 SHA-256").fill("a".repeat(64));
   await page.getByLabel("更新说明", { exact: true }).fill("Synthetic version guidance");
   const publish = page.waitForResponse(r => r.url().endsWith("/client-releases") && r.request().method() === "POST");
-  await page.getByRole("button", { name: "发布版本引导", exact: true }).click();
+  await page.getByRole("button", { name: "发布更新", exact: true }).click();
   assert.equal((await publish).status(), 201);
   const info = await (await page.request.get(base + "/api/core/v1/client-info?platform=macos&arch=aarch64&version=0.3.0")).json();
   assert.equal(info.latest.version, "0.3.1"); assert.equal(info.support_email, "support@example.test");
@@ -247,7 +295,7 @@ try {
   await page.getByText("已保存。新额度仅用于后续注册；官方模型范围对所有用户生效。", { exact: true }).waitFor();
   assert.deepEqual((await (await fetch(base + "/api/core/v1/official-models")).json()).models, []);
   assert.deepEqual(errors, []);
-  console.log("PASS: isolated Admin registration/credits, Core model scope, user search/pagination, ban/unban, single/all session revocation, contact/releases/feedback; no browser errors or upstream calls.");
+  console.log("PASS: isolated Admin registration/credits, read-only usage-anomaly audit, Core model scope, user search/pagination, ban/unban, single/all session revocation, contact/releases/feedback; no browser errors or upstream calls.");
   console.log("Synthetic test database retained at: " + directory);
 } finally {
   if (browser) await browser.close();

@@ -6,10 +6,15 @@ import pytest
 from test_platform import auth
 from test_platform import env as source_env
 
+from app.official_content import catalog
+
+CORE_VERSION = catalog()["core_version"]
+FUTURE_VERSION = f"{int(CORE_VERSION.split('.')[0]) + 1}.0.0"
+
 env = source_env
 ADMIN = "/api/admin/v1/official-content"
 PUBLIC = "/api/core/v1/official-content"
-INFO = "/api/core/v1/client-info?platform=macos&arch=aarch64&content_protocol=2&version="
+INFO = "/api/core/v1/client-info?platform=macos&arch=aarch64&content_protocol=3&version="
 
 
 def save(c, headers, kind="skills", edit=None):
@@ -22,7 +27,7 @@ def save(c, headers, kind="skills", edit=None):
     return response.json()
 
 
-def publish(c, headers, kind="skills", minimum="0.3.0"):
+def publish(c, headers, kind="skills", minimum=CORE_VERSION):
     draft = c.get(f"{ADMIN}/{kind}").json()
     response = c.post(
         f"{ADMIN}/{kind}/releases",
@@ -40,13 +45,30 @@ def publish(c, headers, kind="skills", minimum="0.3.0"):
 
 def test_drafts_are_private_and_unpublished_content_is_not_distributed(env):
     assert env.get(f"{ADMIN}/skills").status_code == 401
-    assert env.get(INFO + "0.3.0").json()["system_skills"] is None
+    assert env.get(INFO + CORE_VERSION).json()["system_skills"] is None
     headers = auth(env)
     draft = save(env, headers)
     assert draft["items"] and draft["revision"] == 1
-    assert env.get(INFO + "0.3.0").json()["system_skills"] is None
+    assert env.get(INFO + CORE_VERSION).json()["system_skills"] is None
     assert env.put(f"{ADMIN}/skills", json={"revision": 1, "items": draft["items"]}).status_code == 403
     assert env.put(f"{ADMIN}/skills", headers=headers, json={"revision": 0, "items": draft["items"]}).status_code == 409
+
+
+def test_legacy_skill_permissions_are_discarded_and_custom_drafts_are_preserved(env):
+    headers = auth(env)
+    saved = save(env, headers, edit=lambda items: items[0].update(
+        instructions="Keep administrator guidance.",
+        allowShell=False,
+        allowedToolIds=["retired.tool"],
+        forbiddenToolIds=["files.read_content"],
+    ))
+    assert saved["items"][0]["instructions"] == "Keep administrator guidance."
+    assert saved["skill_catalog"][0]["instructions"] != saved["items"][0]["instructions"]
+    release = publish(env, headers)
+    payload = json.loads(env.get(release["download_path"]).json()["content"])
+    assert payload["required_tools"] == []
+    for skill in payload["items"]:
+        assert not {"allowShell", "allowedToolIds", "forbiddenToolIds"}.intersection(skill)
 
 
 def test_publication_is_immutable_hashed_and_compatible_without_login(env):
@@ -60,19 +82,21 @@ def test_publication_is_immutable_hashed_and_compatible_without_login(env):
         json={
             "revision": old["revision"],
             "version": 1,
-            "min_core_version": "0.3.0",
+            "min_core_version": CORE_VERSION,
             "notes": "replace",
         },
     )
     assert response.status_code == 409
     env.cookies.clear()
-    info = env.get(INFO + "0.3.0").json()
+    info = env.get(INFO + CORE_VERSION).json()
     assert info["system_skills"]["id"] == release["id"] and info["tools"] is None
     assert env.get(INFO + "0.2.0").json()["system_skills"] is None
     downloaded = env.get(release["download_path"]).json()
     assert hashlib.sha256(downloaded["content"].encode()).hexdigest() == release["sha256"]
     body = json.loads(downloaded["content"])
-    assert body["version"] == 1 and body["required_tools"]
+    assert body["version"] == 1 and body["required_tools"] == []
+    assert body["schema_version"] == 2
+    assert env.get(INFO.replace("content_protocol=3", "content_protocol=2") + CORE_VERSION).json()["system_skills"] is None
     assert all("planningContract" not in s and "builtIn" not in s for s in body["items"])
     assert env.get(f"{PUBLIC}/tools/{release['id']}").status_code == 404
 
@@ -88,7 +112,7 @@ def test_edit_publish_withdraw_and_restore_as_higher_version(env):
     assert payload["items"][0]["version"] == first_draft["items"][0]["version"] + 1
     assert env.delete(f"{ADMIN}/skills/releases/{second['id']}", headers=headers).status_code == 200
     assert env.get(second["download_path"]).status_code == 410
-    assert env.get(INFO + "0.3.0").json()["system_skills"]["id"] == first["id"]
+    assert env.get(INFO + CORE_VERSION).json()["system_skills"]["id"] == first["id"]
     historical = env.get(f"{ADMIN}/skills/releases/{first['id']}").json()
     save(env, headers, edit=lambda items: items.__setitem__(slice(None), json.loads(historical["content"])["items"]))
     restored = publish(env, headers)
@@ -98,9 +122,9 @@ def test_edit_publish_withdraw_and_restore_as_higher_version(env):
         == first_draft["items"][0]["instructions"]
     )
     # A newer release requiring a newer binary does not hide the compatible publication.
-    publish(env, headers, minimum="0.4.0")
-    assert env.get(INFO + "0.3.0").json()["system_skills"]["version"] == 3
-    assert env.get(INFO + "0.4.0").json()["system_skills"]["version"] == 4
+    publish(env, headers, minimum=FUTURE_VERSION)
+    assert env.get(INFO + CORE_VERSION).json()["system_skills"]["version"] == 3
+    assert env.get(INFO + FUTURE_VERSION).json()["system_skills"]["version"] == 4
 
 
 def test_tool_publication_contains_configuration_but_no_execution_code(env):
@@ -124,9 +148,9 @@ def test_tool_publication_contains_configuration_but_no_execution_code(env):
         }
         for t in body["items"]
     )
-    assert env.get(INFO + "0.3.0").json()["tools"]["version"] == 1
+    assert env.get(INFO + CORE_VERSION).json()["tools"]["version"] == 1
     # Older Core binaries can only decode the original switch-only format.
-    assert env.get(INFO.replace("content_protocol=2&", "") + "0.3.0").json()["tools"] is None
+    assert env.get(INFO.replace("content_protocol=3&", "") + CORE_VERSION).json()["tools"] is None
 
 
 def file_tool(items):
@@ -226,9 +250,10 @@ def test_tool_nested_constraints_and_legacy_drafts(env):
     [
         ("skills", lambda items: items[0].update(planningContract={})),
         ("skills", lambda items: items[0].update(id="skill-personal")),
-        ("skills", lambda items: items[0].update(allowedToolIds=["unknown.tool"])),
+        ("skills", lambda items: items[0].update(allowedToolIds="invalid")),
         ("skills", lambda items: items[0].update(instructions="Bearer " + "x" * 30)),
         ("tools", lambda items: items[0].update(implementation="replacement")),
+        ("tools", lambda items: items[0].update(outputSchema={})),
         ("tools", lambda items: items[0].update(inputSchema=None)),
         ("tools", lambda items: items[0].update(description=None)),
         ("tools", lambda items: items[0].update(min_implementation_version=1000)),
@@ -255,12 +280,12 @@ def test_stale_publication_cannot_publish_another_admins_draft(env):
         json={
             "revision": stale["revision"],
             "version": 1,
-            "min_core_version": "0.3.0",
+            "min_core_version": CORE_VERSION,
             "notes": "stale",
         },
     )
     assert response.status_code == 409
-    assert env.get(INFO + "0.3.0").json()["system_skills"] is None
+    assert env.get(INFO + CORE_VERSION).json()["system_skills"] is None
 
 
 def test_updated_core_catalog_preserves_switches_and_requires_enabling_new_tools(env, monkeypatch):
@@ -269,7 +294,7 @@ def test_updated_core_catalog_preserves_switches_and_requires_enabling_new_tools
     headers = auth(env)
     saved = save(env, headers, "tools", lambda items: items[0].update(enabled=False, name="管理员定义的名称"))
     updated = copy.deepcopy(official_content.catalog())
-    updated["core_version"] = "0.4.0"
+    updated["core_version"] = FUTURE_VERSION
     updated["tools"][0]["version"] += 1
     updated["tools"].append({**updated["tools"][0], "id": "new.tool", "enabled": True})
     monkeypatch.setattr(official_content, "catalog", lambda: updated)
@@ -279,9 +304,9 @@ def test_updated_core_catalog_preserves_switches_and_requires_enabling_new_tools
     assert draft["items"][0]["min_implementation_version"] == saved["items"][0]["min_implementation_version"] + 1
     assert draft["items"][-1]["id"] == "new.tool" and draft["items"][-1]["enabled"] is False
     save(env, headers, "tools", lambda items: items[-1].update(enabled=True))
-    release = publish(env, headers, "tools", minimum="0.4.0")
-    assert env.get(INFO + "0.3.0").json()["tools"] is None
-    assert env.get(INFO + "0.4.0").json()["tools"]["id"] == release["id"]
+    release = publish(env, headers, "tools", minimum=FUTURE_VERSION)
+    assert env.get(INFO + CORE_VERSION).json()["tools"] is None
+    assert env.get(INFO + FUTURE_VERSION).json()["tools"]["id"] == release["id"]
 
 
 def test_old_clients_keep_their_latest_supported_tool_release(env):
@@ -296,7 +321,7 @@ def test_old_clients_keep_their_latest_supported_tool_release(env):
             "schema_version": 1,
             "kind": "tools",
             "version": 1,
-            "min_core_version": "0.3.0",
+            "min_core_version": CORE_VERSION,
             "required_tools": [],
             "items": [{k: t[k] for k in ("id", "enabled", "min_implementation_version")} for t in draft["items"]],
         }
@@ -307,7 +332,7 @@ def test_old_clients_keep_their_latest_supported_tool_release(env):
                 id="legacy",
                 kind="tools",
                 version=1,
-                min_core_version="0.3.0",
+                min_core_version=CORE_VERSION,
                 notes="Existing switch-only publication",
                 payload=content,
                 sha256=hashlib.sha256(content.encode()).hexdigest(),
@@ -317,8 +342,8 @@ def test_old_clients_keep_their_latest_supported_tool_release(env):
         db.commit()
     modern = publish(env, headers, "tools")
     assert modern["version"] == 2 and modern["schema_version"] == 2
-    assert env.get(INFO + "0.3.0").json()["tools"]["id"] == modern["id"]
-    assert env.get(INFO.replace("content_protocol=2&", "") + "0.3.0").json()["tools"]["id"] == "legacy"
+    assert env.get(INFO + CORE_VERSION).json()["tools"]["id"] == modern["id"]
+    assert env.get(INFO.replace("content_protocol=3&", "") + CORE_VERSION).json()["tools"]["id"] == "legacy"
     assert env.get(f"{PUBLIC}/tools/legacy").json()["content"] == content
 
 
@@ -342,3 +367,17 @@ def test_catalog_schema_changes_are_explained_before_resaving(env, monkeypatch):
     assert file_tool(draft["items"])["inputSchema"] == file["inputSchema"]
     saved = save(env, headers, "tools")
     assert saved["catalog_warnings"] == []
+
+
+def test_conditional_tool_defaults_reject_missing_select_options(env):
+    headers = auth(env)
+    draft = save(env, headers, "tools")
+    items = copy.deepcopy(draft["items"])
+    schema = next(t for t in items if t["id"] == "user.request_input")["inputSchema"]
+    schema["properties"]["fields"]["default"] = [
+        {"key": "target", "label": "Target", "description": "Choose target", "type": "select", "required": True}
+    ]
+    result = env.put(f"{ADMIN}/tools", headers=headers, json={"revision": draft["revision"], "items": items})
+    assert result.status_code == 422, result.text
+    assert result.json()["error"]["code"] == "INVALID_TOOL_PARAMETERS"
+    assert env.get(f"{ADMIN}/tools").json()["items"] == draft["items"]

@@ -75,3 +75,57 @@ def test_call_correlation_upgrade_preserves_history_and_uses_reservations_for_id
         records = connection.execute(text("SELECT id,user_id,task_id,status FROM model_calls ORDER BY id")).all()
         assert records == [("key-call", None, None, "succeeded"), ("official-call", "u", None, "succeeded")]
     engine.dispose()
+
+
+def test_presets_migration_keeps_existing_routes_custom(tmp_path):
+    url = "sqlite:///" + (tmp_path / "presets.db").as_posix()
+    root = Path(__file__).resolve().parents[1]
+    environment = {**os.environ, "DATABASE_URL": url}
+    subprocess.run([sys.executable, "-m", "alembic", "upgrade", "0009"],
+                   cwd=root, env=environment, check=True, capture_output=True)
+    engine = create_engine(url)
+    with engine.begin() as connection:
+        connection.execute(text("INSERT INTO model_providers "
+                                "(id,name,base_url,encrypted_key,enabled,timeout_seconds) "
+                                "VALUES ('p','test','https://example.test/v1','synthetic',1,60)"))
+        connection.execute(text("INSERT INTO model_routes (id,alias,provider_id,upstream_model,enabled) "
+                                "VALUES ('r','existing','p','deepseek-flash',1)"))
+    for _ in range(2):
+        subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"],
+                       cwd=root, env=environment, check=True, capture_output=True)
+    with engine.connect() as connection:
+        row = connection.execute(text("SELECT alias,upstream_model,preset_id FROM model_routes")).one()
+        assert row == ("existing", "deepseek-flash", "custom")
+    engine.dispose()
+
+
+def test_dual_api_migration_preserves_legacy_chat_and_unknown_usage(tmp_path):
+    url = "sqlite:///" + (tmp_path / "dual-api.db").as_posix()
+    root = Path(__file__).resolve().parents[1]
+    environment = {**os.environ, "DATABASE_URL": url}
+    subprocess.run([sys.executable, "-m", "alembic", "upgrade", "0010"],
+                   cwd=root, env=environment, check=True, capture_output=True)
+    engine = create_engine(url)
+    with engine.begin() as connection:
+        connection.execute(text("INSERT INTO model_providers "
+                                "(id,name,base_url,encrypted_key,enabled,timeout_seconds) "
+                                "VALUES ('p','test','https://example.test/v1','synthetic',1,60)"))
+        connection.execute(text("INSERT INTO model_routes (id,alias,provider_id,upstream_model,enabled) "
+                                "VALUES ('r','existing','p','private-model',1)"))
+        connection.execute(text("INSERT INTO model_routes (id,alias,provider_id,upstream_model,enabled,preset_id) "
+                                "VALUES ('known','known','p','gpt-4.1',1,'openai-gpt41-v1')"))
+        connection.execute(text("INSERT INTO model_calls (id,key_id,owner,provider_id,model,started_at,status,input_tokens) "
+                                "VALUES ('c','k','owner','p','existing',1000,'succeeded',5)"))
+    for _ in range(2):
+        subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"],
+                       cwd=root, env=environment, check=True, capture_output=True)
+    with engine.connect() as connection:
+        assert connection.execute(text("SELECT alias,api_protocol,structured_output,budget_semantics,capabilities_v2_enabled "
+                                       "FROM model_routes WHERE id='r'")).one() == (
+            "existing", "chat_completions", "unknown", "unknown", False)
+        assert connection.execute(text(
+            "SELECT capabilities_v2_enabled FROM model_routes WHERE id='known'"
+        )).scalar() == 1
+        assert connection.execute(text("SELECT api_protocol,input_tokens,output_tokens,cached_tokens,reasoning_tokens "
+                                       "FROM model_calls")).one() == ("chat_completions", 5, None, None, None)
+    engine.dispose()

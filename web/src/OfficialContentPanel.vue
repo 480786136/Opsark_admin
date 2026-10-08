@@ -174,9 +174,6 @@ function addSkill() {
     matchRules: [],
     enabled: true,
     version: 1,
-    allowShell: false,
-    allowedToolIds: [],
-    forbiddenToolIds: [],
   });
   selectedId.value = id;
   editorOpen.value = true;
@@ -193,6 +190,25 @@ function removeSkill() {
   );
   editorOpen.value = false;
   selectedId.value = draft.value.items[0]?.id || "";
+}
+function importSkillCatalog() {
+  if (
+    !window.confirm(
+      "将当前 Core 内置 Skill 合并到本页草稿？同 ID 的正文会替换为内置版本，保留启用状态和其他自建 Skill；保存并发布前不会影响 Core。",
+    )
+  )
+    return;
+  const current = new Map(draft.value.items.map((item) => [item.id, item]));
+  for (const item of draft.value.skill_catalog || []) {
+    const old = current.get(item.id);
+    current.set(item.id, {
+      ...JSON.parse(JSON.stringify(item)),
+      enabled: old?.enabled ?? item.enabled,
+      version: Math.max(old?.version ?? 1, item.version),
+    });
+  }
+  draft.value.items = [...current.values()];
+  notice.value = "内置 Skill 已合并到本页草稿，请检查后保存并发布。";
 }
 async function inspect(item) {
   preview.value = await props.api(`${base}/releases/${item.id}`);
@@ -265,6 +281,14 @@ onMounted(() => run(refresh));
           </p>
         </div>
         <div class="toolbar-actions">
+          <button
+            v-if="skills && view === 'draft'"
+            class="secondary"
+            :disabled="busy"
+            @click="importSkillCatalog"
+          >
+            导入内置 Skill
+          </button>
           <button class="secondary" :disabled="busy" @click="run(reload)">
             刷新草稿</button
           ><button
@@ -439,33 +463,12 @@ onMounted(() => run(refresh));
                   "
                 />
               </label>
-              <label class="check"
-                ><input v-model="selected.allowShell" type="checkbox" />允许请求
-                Shell（仍需本机授权）</label
-              >
-              <details>
-                <summary>工作流工具范围</summary>
-                <div
-                  class="tool-choices"
-                  v-for="tool in draft.tool_catalog"
-                  :key="tool.id"
-                >
-                  <span>{{ tool.name }}</span
-                  ><label class="check"
-                    ><input
-                      v-model="selected.allowedToolIds"
-                      type="checkbox"
-                      :value="tool.id"
-                    />允许请求</label
-                  ><label class="check"
-                    ><input
-                      v-model="selected.forbiddenToolIds"
-                      type="checkbox"
-                      :value="tool.id"
-                    />明确禁止</label
-                  >
-                </div>
-              </details>
+              <p>
+                Skill 仅提供领域流程与验收参考，不配置工具白名单、黑名单或 Shell
+                权限。
+                模型可根据实际证据调整步骤；工具可用性、用户授权和安全检查由
+                Core 独立控制。
+              </p>
               <p>
                 内容变更发布时自动递增 Skill
                 版本。修改内置指令后使用完整指令规划，本地旧阶段合同不再套用。

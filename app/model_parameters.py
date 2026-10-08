@@ -14,20 +14,27 @@ class ModelParameters(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     thinking: Thinking | None = None
+    enable_thinking: bool | None = Field(default=None, strict=True)
     reasoning_effort: Literal["none", "low", "medium", "high", "max"] | None = None
-    temperature: float | None = Field(default=None, ge=0, le=2)
-    top_p: float | None = Field(default=None, gt=0, le=1)
-    max_tokens: int | None = Field(default=None, ge=1, le=131072)
-    max_completion_tokens: int | None = Field(default=None, ge=1, le=131072)
-    presence_penalty: float | None = Field(default=None, ge=-2, le=2)
-    frequency_penalty: float | None = Field(default=None, ge=-2, le=2)
+    temperature: float | None = Field(default=None, ge=0, le=2, strict=True)
+    top_p: float | None = Field(default=None, ge=0, le=1, strict=True)
+    max_tokens: int | None = Field(default=None, ge=1, le=131072, strict=True)
+    max_completion_tokens: int | None = Field(default=None, ge=1, le=131072, strict=True)
+    max_output_tokens: int | None = Field(default=None, ge=1, le=131072, strict=True)
+    presence_penalty: float | None = Field(default=None, ge=-2, le=2, strict=True)
+    frequency_penalty: float | None = Field(default=None, ge=-2, le=2, strict=True)
 
     @model_validator(mode="after")
     def compatible(self):
-        if self.max_tokens is not None and self.max_completion_tokens is not None:
-            raise ValueError("max_tokens 与 max_completion_tokens 不能同时设置")
+        if sum(value is not None for value in (self.max_tokens, self.max_completion_tokens, self.max_output_tokens)) > 1:
+            raise ValueError("生成预算字段不能同时设置")
         if self.thinking and self.thinking.type == "disabled" and self.reasoning_effort not in {None, "none"}:
             raise ValueError("关闭思考时 reasoning_effort 只能为空或 none")
+        if self.enable_thinking is not None:
+            if self.thinking and self.enable_thinking != (self.thinking.type == "enabled"):
+                raise ValueError("thinking 与 enable_thinking 冲突")
+            if not self.enable_thinking and self.reasoning_effort not in {None, "none"}:
+                raise ValueError("关闭思考时 reasoning_effort 只能为空或 none")
         return self
 
     def compact(self):
@@ -48,10 +55,11 @@ def validate_call_parameters(body):
 def merge_parameters(defaults, request_values, overrides):
     result = {}
     for layer in (defaults or {}, request_values or {}, overrides or {}):
-        if "max_tokens" in layer:
-            result.pop("max_completion_tokens", None)
-        if "max_completion_tokens" in layer:
-            result.pop("max_tokens", None)
+        for budget in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
+            if budget in layer:
+                for other in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
+                    if other != budget:
+                        result.pop(other, None)
         result.update(layer)
     try:
         return ModelParameters.model_validate(result).compact()

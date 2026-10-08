@@ -1,12 +1,15 @@
 # Opsark_admin 平台管理
 
+
+**2026-09-27 J3 更新**：模型路由可明确选择 Chat Completions 或 Responses。Responses 首批仅接受文本、非流式与客户端上下文；按同一协议转发，不开放原生工具、后台生成或供应商续接。部署时先执行 `alembic upgrade head`（0011）；既有自定义路由保留旧能力契约，新增路由使用版本化 `capabilitiesV2`，未知输出能力需管理员明确声明。`X-Opsark-Expected-Capability-Revision` 由网关预检消费，不转交上游。官方账号继续按实际 input + output 用量扣费，cached/reasoning 单独记录且不重复计费；缺失用量保持未知。模型 Key 保留原有授权与 RPM 语义，不继承账号幂等/余额权限。详见根项目 J3 实施记录。
+
 更新：2026-09-08。目标：本项目独立负责多家第三方模型 API 配置、模型映射、用户模型 Key、实际转发和调用监控，后续承载用户/计费；不负责知识管理。知识项目应有自己的管理页面和鉴权。
 
 **2026-09-08 代码更新**：知识管理已迁至知识项目。Admin 现有供应商配置、模型路由、用户模型 Key、Chat Completions 兼容协议的 JSON/SSE 转发及调用监控。真实供应商、生产部署和完整一期目标尚未验收。升级/启动请优先使用 [独立系统开发版使用与验收](docs/独立系统开发版使用与验收.md)，其中包含新增环境变量、迁移与端口说明。没有改动用户 .env 或升级用户数据库。
 
 ## 服务器部署（zgspace.cn）
 
-服务器需安装 Git、Docker Engine、Docker Compose 插件和 Nginx，并将 `zgspace.cn` 的 DNS A/AAAA 记录指向服务器。以下配置会让 Admin 占用该域名根路径。
+服务器需安装 Git、Docker Engine、Docker Compose 插件和 Nginx，并将 `zgspace.cn` 的 DNS A/AAAA 记录指向服务器。当前生产管理页使用 `https://zgspace.cn/opsark-admin/`，与官网、原 `/admin/` 和 Java `/api/` 共存。
 
 ```bash
 sudo mkdir -p /srv/opsark
@@ -39,40 +42,24 @@ docker compose ps
 curl http://127.0.0.1:8001/health/live
 ```
 
-新建 `/etc/nginx/sites-available/opsark`：
+在 `zgspace.cn` 现有 HTTPS `server` 中加入以下路由，并放在通用 `/api/` 和 `/` 路由之前：
 
 ```nginx
-server {
-    listen 80;
-    server_name zgspace.cn www.zgspace.cn;
-
-    location = /api/core/v1/auth/github/callback {
-        access_log off;
-        proxy_pass http://127.0.0.1:8001;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    location / {
-        proxy_pass http://127.0.0.1:8001;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
+location = /api/core/v1/auth/github/callback { access_log off; proxy_pass http://127.0.0.1:8001; }
+location = /api/core/v1/feedback { client_max_body_size 86m; proxy_pass http://127.0.0.1:8001; }
+location = /health/live { access_log off; proxy_pass http://127.0.0.1:8001; }
+location ^~ /api/core/ { proxy_pass http://127.0.0.1:8001; }
+location ^~ /api/admin/v1/ { proxy_pass http://127.0.0.1:8001; }
+location ^~ /v1/ { proxy_pass http://127.0.0.1:8001; proxy_buffering off; proxy_read_timeout 300s; }
+location = /opsark-admin { return 301 /opsark-admin/; }
+location ^~ /opsark-admin/ {
+    proxy_pass http://127.0.0.1:8001/;
+    sub_filter_once off;
+    sub_filter '/assets/' '/opsark-admin/assets/';
 }
 ```
 
-启用站点并申请 HTTPS 证书：
-
-```bash
-sudo ln -s /etc/nginx/sites-available/opsark /etc/nginx/sites-enabled/opsark
-sudo nginx -t
-sudo systemctl reload nginx
-sudo certbot --nginx -d zgspace.cn -d www.zgspace.cn
-```
+运行 `sudo nginx -t && sudo systemctl reload nginx`。生产环境需使用有效 HTTPS 证书。
 
 部署后检查：
 

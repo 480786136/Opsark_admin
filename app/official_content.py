@@ -42,9 +42,10 @@ class Skill(Strict):
     matchRules: list[str] = Field(default_factory=list, max_length=100)
     enabled: bool = Field(strict=True)
     version: int = Field(strict=True, ge=1, le=2147483647)
-    allowShell: bool = Field(default=True, strict=True)
-    allowedToolIds: list[str] = Field(default_factory=list, max_length=200)
-    forbiddenToolIds: list[str] = Field(default_factory=list, max_length=200)
+    # Read legacy drafts without carrying permission-like metadata into releases.
+    allowShell: bool = Field(default=True, strict=True, exclude=True)
+    allowedToolIds: list[str] = Field(default_factory=list, max_length=200, exclude=True)
+    forbiddenToolIds: list[str] = Field(default_factory=list, max_length=200, exclude=True)
 
 
 class ToolPolicy(Strict):
@@ -81,8 +82,6 @@ def validate_items(kind, items):
                 not item[key].strip() for key in ("name", "description", "instructions")
             ):
                 raise ApiError(422, "INVALID_OFFICIAL_CONTENT", "官方 Skill 不能使用个人 Skill 标识，正文不能为空")
-            if not set(item["allowedToolIds"] + item["forbiddenToolIds"]).issubset(tools):
-                raise ApiError(422, "UNKNOWN_TOOL", "Skill 引用了当前 Core 目录不存在的工具")
             if any(len(rule) > 500 for rule in item["matchRules"]):
                 raise ApiError(422, "INVALID_OFFICIAL_CONTENT", "匹配规则过长")
         elif item["id"] not in tools or item["min_implementation_version"] != tools[item["id"]]["version"]:
@@ -146,6 +145,8 @@ def available_content(db, core_version, content_protocol=1):
                 for r in rows
                 if version_tuple(r.min_core_version) <= core_version
                 and json.loads(r.payload)["schema_version"] <= content_protocol
+                # Protocol 2 clients understand tool schemas, but not guidance-only Skills.
+                and not (kind == "skills" and json.loads(r.payload)["schema_version"] == 2 and content_protocol < 3)
             ),
             None,
         )
@@ -169,6 +170,8 @@ class PublishInput(Strict):
 def read_draft(kind: Kind, db=Depends(get_db)):
     row = db.get(OfficialContentDraft, kind)
     items = row.items if row else defaults(kind)
+    if row and kind == "skills":
+        items = validate_items(kind, items)
     warnings = []
     if row and kind == "tools":
         previous = {item["id"]: item for item in row.items}
@@ -199,6 +202,7 @@ def read_draft(kind: Kind, db=Depends(get_db)):
         "next_version": latest.version + 1 if latest else 1,
         "catalog_core_version": catalog()["core_version"],
         "tool_catalog": catalog()["tools"],
+        "skill_catalog": defaults("skills") if kind == "skills" else [],
         "catalog_warnings": warnings,
     }
 
@@ -274,19 +278,13 @@ def publish(kind: Kind, body: PublishInput, staff=Depends(require_admin), db=Dep
                 }
                 item["version"] = max(item["version"], old["version"] + int(changed))
         draft.items = items
-    needed = (
-        set().union(*(set(s["allowedToolIds"] + s["forbiddenToolIds"]) for s in items)) if kind == "skills" else set()
-    )
-    required_tools = [
-        {"id": t["id"], "min_implementation_version": t["version"]} for t in catalog()["tools"] if t["id"] in needed
-    ]
     payload = json.dumps(
         {
-            "schema_version": 2 if kind == "tools" else 1,
+            "schema_version": 2,
             "kind": kind,
             "version": body.version,
             "min_core_version": body.min_core_version,
-            "required_tools": required_tools,
+            "required_tools": [],
             "items": items,
         },
         ensure_ascii=False,

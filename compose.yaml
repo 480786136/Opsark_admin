@@ -1,6 +1,7 @@
 services:
   db:
     image: postgres:17
+    restart: unless-stopped
     environment:
       POSTGRES_USER: platform
       POSTGRES_PASSWORD: ${PLATFORM_DB_PASSWORD:?set PLATFORM_DB_PASSWORD}
@@ -12,6 +13,11 @@ services:
       retries: 12
   api:
     build: .
+    restart: unless-stopped
+    # The production host's default DNS currently returns an unreachable GitHub edge.
+    # HTTPS still validates the github.com certificate; remove this pin when routing recovers.
+    extra_hosts:
+      - "github.com:140.82.112.4"
     environment:
       DATABASE_URL: postgresql+psycopg://platform:${PLATFORM_DB_PASSWORD}@db:5432/platform
       MODEL_KEY_ENCRYPTION_KEY: ${MODEL_KEY_ENCRYPTION_KEY:?set MODEL_KEY_ENCRYPTION_KEY}
@@ -28,6 +34,7 @@ services:
   model-db:
     profiles: [models]
     image: postgres:17
+    restart: unless-stopped
     environment:
       POSTGRES_USER: litellm
       POSTGRES_PASSWORD: ${MODEL_DB_PASSWORD:-}
@@ -40,6 +47,7 @@ services:
   gateway:
     profiles: [models]
     image: ${LITELLM_IMAGE:-ghcr.io/berriai/litellm:main-stable}
+    restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://litellm:${MODEL_DB_PASSWORD:-}@model-db:5432/litellm
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-}

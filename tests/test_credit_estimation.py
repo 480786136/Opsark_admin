@@ -114,7 +114,7 @@ def test_zero_balance_has_explanation_and_zero_billing(setup):
 
 @pytest.mark.parametrize("usage", [None, {"prompt_tokens": -1, "completion_tokens": 2},
                                   {"prompt_tokens": 150000, "completion_tokens": 2}])
-def test_unknown_or_unpaid_usage_is_recorded_and_blocks_further_official_calls(setup, usage):
+def test_unknown_or_unpaid_usage_is_recorded_without_blocking_later_calls(setup, usage):
     client, staff, _, _, _ = setup
     configure(client, staff, tokens=100000, models=["public-model"])
     _, headers = signup(client)
@@ -134,14 +134,13 @@ def test_unknown_or_unpaid_usage_is_recorded_and_blocks_further_official_calls(s
     assert balance["reserved"] == 0
     second = client.post("/v1/chat/completions", headers={**headers, "Idempotency-Key": "usage-reconciliation-next"},
                          json=payload)
-    assert second.status_code == 409
-    assert second.json()["error"]["code"] == "CREDITS_RECONCILIATION_REQUIRED"
-    assert second.json()["error"]["details"]["retryable"] is False
-    assert len(dispatched) == 1
+    assert second.status_code == 200
+    assert len(dispatched) == 2
     assert client.get("/api/core/v1/me", headers=headers).json()["balance"] == balance
     for db in app.dependency_overrides[get_db]():
         pending = list(db.scalars(select(ModelReservation)))
-        assert len(pending) == 1 and pending[0].state == "needs_reconciliation"
+        assert len(pending) == 2
+        assert all(row.state == "needs_reconciliation" for row in pending)
 
 
 def pending_overage(env, tokens=100):

@@ -100,6 +100,7 @@ def test_oauth_pkce_device_binding_one_use_and_single_registration_grant(oauth):
 def test_same_email_does_not_auto_link_and_authenticated_link_grants_no_extra_credit(oauth):
     c = oauth
     local, headers = signup(c)
+    assert c.get("/api/core/v1/me", headers=headers).json()["github_linked"] is False
     proof, state, _ = start(c)
     transport(email=CREDS["email"])
     callback(c, state)
@@ -111,6 +112,7 @@ def test_same_email_does_not_auto_link_and_authenticated_link_grants_no_extra_cr
     assert c.post(PREFIX + "/complete", json=proof2).status_code == 401
     result = c.post(PREFIX + "/complete", json=proof2, headers=headers)
     assert result.json() == {"status": "linked"}
+    assert c.get("/api/core/v1/me", headers=headers).json()["github_linked"] is True
     for db in app.dependency_overrides[get_db]():
         assert db.scalar(select(GithubIdentity)).user_id == local["user"]["id"]
         assert db.scalar(select(func.count()).select_from(CreditLedger)) == 1

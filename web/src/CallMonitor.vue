@@ -1,6 +1,7 @@
 <script setup>
 import { computed, reactive, ref, watch } from "vue";
 import DetailDialog from "./DetailDialog.vue";
+import ParameterComparison from "./ParameterComparison.vue";
 const props = defineProps({
   api: { type: Function, required: true },
   scope: { type: Object, default: () => ({}) },
@@ -524,6 +525,12 @@ watch(
           >
             输出达到长度上限，响应可能不完整。
           </p>
+          <p v-if="detail.detail.preset_id" class="table-note">
+            模型预设：{{ detail.detail.preset_id }}；参数转换：{{
+              detail.detail.parameter_changes?.join("；") || "无"
+            }}。
+          </p>
+          <ParameterComparison v-if="detail.detail.effective_parameters" :requested="detail.detail.requested_parameters || {}" :effective="detail.detail.effective_parameters" :output-mode="detail.detail.effective_output_mode || ''"/>
           <div class="subnav">
             <button
               :aria-pressed="contentTab === 'input'"

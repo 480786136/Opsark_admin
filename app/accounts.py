@@ -13,8 +13,20 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
-from .credits import balance, change, settle
+from .cloud_models import GithubIdentity
+from .credits import (
+    OPEN_RESERVATION_STATES,
+    RECONCILIATION_GRACE_SECONDS,
+    balance,
+    change,
+    close_stale_call,
+    lock_account,
+    reconciliation_metadata,
+    refresh_reconciliations,
+    settle,
+)
 from .db import get_db
+from .model_delivery import request_status
 from .models import ModelCall, ModelRoute
 from .security import ApiError, digest, limiter, require_admin, token
 from .user_models import (
@@ -215,6 +227,10 @@ def me(session=Depends(require_user), db=Depends(get_db)):
         "balance": balance(db, user.id),
         "allowed_models": policy(db).allowed_models,
         "billing_mode": "direct",
+        "github_linked": db.scalar(
+            select(GithubIdentity.github_id).where(GithubIdentity.user_id == user.id)
+        )
+        is not None,
     }
 
 
@@ -241,6 +257,8 @@ def user_usage(session=Depends(require_user), db=Depends(get_db)):
 
 @public.get("/model-requests/{request_key}")
 def model_request_status(request_key: str, session=Depends(require_user), db=Depends(get_db)):
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{16,128}", request_key):
+        raise ApiError(404, "REQUEST_NOT_FOUND")
     row = db.execute(
         select(ModelReservation, ModelCall)
         .join(ModelCall, ModelCall.id == ModelReservation.id)
@@ -249,14 +267,7 @@ def model_request_status(request_key: str, session=Depends(require_user), db=Dep
     if row is None:
         raise ApiError(404, "REQUEST_NOT_FOUND")
     reservation, call = row
-    return {
-        "call_id": call.id,
-        "status": call.status,
-        "error_code": call.error_code,
-        "credit_state": reservation.state,
-        "reserved": reservation.amount,
-        "actual": reservation.actual,
-    }
+    return request_status(reservation, call)
 
 
 def model_identity(request, db):
@@ -552,17 +563,101 @@ def ledger(user_id: str, db=Depends(get_db)):
     ]
 
 
+def reservation_items(db, *, now=None):
+    """Return audit-only usage anomalies; ordinary in-flight calls are omitted."""
+    now = time.time() if now is None else now
+    cutoff = now - RECONCILIATION_GRACE_SECONDS
+    rows = db.execute(
+        select(
+            ModelReservation,
+            UserAccount.email,
+            ModelCall.status,
+            ModelCall.error_code,
+            ModelCall.http_status,
+            ModelCall.provider_id,
+            ModelCall.model,
+            ModelCall.input_tokens,
+            ModelCall.output_tokens,
+        )
+        .join(UserAccount, UserAccount.id == ModelReservation.user_id)
+        .outerjoin(ModelCall, ModelCall.id == ModelReservation.id)
+        .where(
+            (ModelReservation.state == "needs_reconciliation")
+            | (
+                ModelReservation.state.in_(OPEN_RESERVATION_STATES)
+                & (
+                    (ModelReservation.created_at <= cutoff)
+                    | (ModelCall.status.is_not(None) & (ModelCall.status != "running"))
+                )
+            )
+        )
+        .order_by(ModelReservation.created_at)
+        .limit(200)
+    ).all()
+    items = []
+    for (
+        row,
+        email,
+        call_status,
+        error_code,
+        http_status,
+        provider_id,
+        model,
+        input_tokens,
+        output_tokens,
+    ) in rows:
+        metadata = reconciliation_metadata(row, call_status, now=now)
+        usage_complete = (
+            type(input_tokens) is int
+            and input_tokens >= 0
+            and type(output_tokens) is int
+            and output_tokens >= 0
+        )
+        if row.actual is not None and row.amount == 0:
+            anomaly_code = "USAGE_EXCEEDS_BALANCE"
+            anomaly_reason = "已取得真实用量，但当时余额不足；仅记录，不阻断后续调用"
+        elif call_status == "succeeded" and usage_complete:
+            anomaly_code = "SETTLEMENT_INCOMPLETE"
+            anomaly_reason = "调用已成功并记录用量，但结算状态未完成；仅记录供排障"
+        elif call_status == "succeeded":
+            anomaly_code = "USAGE_MISSING"
+            anomaly_reason = "调用成功，但供应商未返回完整有效用量"
+        elif call_status in {"failed", "cancelled"}:
+            anomaly_code = error_code or "CALL_OUTCOME_UNKNOWN"
+            anomaly_reason = "调用失败或结果不确定，无法确认供应商用量"
+        elif row.created_at <= cutoff:
+            anomaly_code = "CALL_TIMEOUT"
+            anomaly_reason = "调用超时仍无最终状态，用量结果未确认"
+        else:
+            anomaly_code = "USAGE_UNKNOWN"
+            anomaly_reason = "供应商用量结果未确认"
+        items.append({
+            **{c.name: getattr(row, c.name) for c in ModelReservation.__table__.columns},
+            "email": email,
+            **metadata,
+            "anomaly_code": anomaly_code,
+            "anomaly_reason": anomaly_reason,
+            "call_error_code": error_code,
+            "http_status": http_status,
+            "provider_id": provider_id,
+            "model": model,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        })
+    return items
+
+
 @admin.get("/credit-reservations")
 def reservations(db=Depends(get_db)):
-    return [
-        {c.name: getattr(r, c.name) for c in ModelReservation.__table__.columns}
-        for r in db.scalars(
-            select(ModelReservation)
-            .where(ModelReservation.state.in_(["reserved", "pending_usage", "needs_reconciliation"]))
-            .order_by(ModelReservation.created_at)
-            .limit(200)
-        )
-    ]
+    return reservation_items(db)
+
+
+@admin.post("/credit-reservations/refresh")
+def refresh_reservations(session=Depends(require_admin), db=Depends(get_db)):
+    now = time.time()
+    result = refresh_reconciliations(db, actor_id=session.admin_id, now=now)
+    db.commit()
+    return {**result, "pending": reservation_items(db, now=now)}
 
 
 class Reconciliation(Strict):
@@ -582,12 +677,32 @@ def reconcile(call_id: str, body: Reconciliation, session=Depends(require_admin)
     row = db.get(ModelReservation, call_id)
     if not row:
         raise ApiError(404, "NOT_FOUND")
+    lock_account(db, row.user_id)
+    row = db.get(ModelReservation, call_id, populate_existing=True)
     if row.state in {"settled", "released"}:
         if row.actual != body.actual:
             raise ApiError(409, "ALREADY_RECONCILED", "已结算且数额不一致，请核对流水")
         return balance(db, row.user_id)
-    if row.state in {"reserved", "pending_usage"} and time.time() - row.created_at < 1200:
+    now = time.time()
+    call = db.get(ModelCall, call_id)
+    state = reconciliation_metadata(row, call.status if call else None, now=now)
+    if row.state in OPEN_RESERVATION_STATES and not state["reconcile_allowed"]:
         raise ApiError(409, "REQUEST_STILL_RUNNING")
-    settle(db, call_id, body.actual, actor_id=session.admin_id, reason=body.reason, allow_overage=True)
+    close_stale_call(db, call, now=now)
+    try:
+        settle(db, call_id, body.actual, actor_id=session.admin_id, reason=body.reason, allow_overage=True)
+    except ApiError as error:
+        # A direct call can have confirmed usage but insufficient funds.  Keep
+        # that fact for the next explicit reconciliation instead of reverting
+        # it to an apparently live call when this request returns 402.
+        refreshed = db.get(ModelReservation, call_id, populate_existing=True)
+        if (
+            error.code == "INSUFFICIENT_CREDITS"
+            and refreshed.amount == 0
+            and refreshed.state == "needs_reconciliation"
+            and refreshed.actual == body.actual
+        ):
+            db.commit()
+        raise
     db.commit()
     return balance(db, row.user_id)
