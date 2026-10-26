@@ -9,12 +9,12 @@ from jsonschema import Draft7Validator
 from app.tool_configuration import validate_value
 
 ROOT = Path(__file__).resolve().parents[2]
-CONTRACTS = json.loads((ROOT / "Opsark_core/contracts/tool-contracts.json").read_text())
-CASES = json.loads((ROOT / "Opsark_core/contracts/schema-cases.json").read_text())["cases"]
+CONTRACTS = json.loads((ROOT / "Opsark_core/contracts/tool-contracts.json").read_text(encoding="utf-8"))
+CASES = json.loads((ROOT / "Opsark_core/contracts/schema-cases.json").read_text(encoding="utf-8"))["cases"]
 
 
 def test_exported_catalog_contracts_match_admin():
-    baseline = json.loads((ROOT / "Opsark_admin/app/resources/core_catalog.json").read_text())
+    baseline = json.loads((ROOT / "Opsark_admin/app/resources/core_catalog.json").read_text(encoding="utf-8"))
     assert CONTRACTS["dialect"] == "http://json-schema.org/draft-07/schema#"
     assert CONTRACTS["tools"] == [
         {key: tool[key] for key in ("id", "inputSchema", "outputSchema") if key in tool}
